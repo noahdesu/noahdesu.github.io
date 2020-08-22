@@ -1,0 +1,564 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #17: Logical Region Tree Traversal</title>
+  <meta name="description" content="Overview">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/04/07/logical-region-tree-traversal.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #17: Logical Region Tree Traversal</h1>
+    <p class="post-meta">Apr 7, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>Overview</h1>
+
+<p>In this class we&#39;ll start to talk about logical region tree traversal.</p>
+
+<h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/l2Vx5xL7Xyg?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG" frameborder="0" allowfullscreen></iframe>
+
+<h1>Logical Dependence Analysis</h1>
+
+<p>Today we&#39;ll start looking at dependence analysis. Recall that the first stage of the operational pipeline is dependence analysis, which registers dependencies on operations that were issued before it. We&#39;ve seen before how that is invoked via <code>perform_dependence_analysis</code> on the region tree.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">MapOp</span><span class="o">::</span><span class="n">trigger_dependence_analysis</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">begin_dependence_analysis</span><span class="p">();</span>
+      <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">forest</span><span class="o">-&gt;</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">get_context</span><span class="p">(),</span>
+                                                   <span class="k">this</span><span class="p">,</span> <span class="mi">0</span><span class="cm">/*idx*/</span><span class="p">,</span> <span class="n">requirement</span><span class="p">,</span>
+                                                   <span class="n">privilege_path</span><span class="p">);</span>
+      <span class="n">end_dependence_analysis</span><span class="p">();</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Looking at other operations we see that the same function is used by all operations:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">CopyOp</span><span class="o">::</span><span class="n">trigger_dependence_analysis</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">begin_dependence_analysis</span><span class="p">();</span>
+      <span class="c1">// Register a dependence on our predicate</span>
+      <span class="n">register_predicate_dependence</span><span class="p">();</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">src_requirements</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">forest</span><span class="o">-&gt;</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">get_context</span><span class="p">(),</span>
+                                                     <span class="k">this</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> 
+                                                     <span class="n">src_requirements</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+                                                     <span class="n">src_privilege_paths</span><span class="p">[</span><span class="n">idx</span><span class="p">]);</span>
+      <span class="p">}</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">dst_requirements</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="kt">unsigned</span> <span class="n">index</span> <span class="o">=</span> <span class="n">src_requirements</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="o">+</span><span class="n">idx</span><span class="p">;</span>
+        <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">forest</span><span class="o">-&gt;</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">get_context</span><span class="p">(),</span>
+                                                     <span class="k">this</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> 
+                                                     <span class="n">dst_requirements</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+                                                     <span class="n">dst_privilege_paths</span><span class="p">[</span><span class="n">idx</span><span class="p">]);</span>
+      <span class="p">}</span>
+      <span class="n">end_dependence_analysis</span><span class="p">();</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>So today we will look into dependence analysis and how that works. At a high-level <code>perform_dependence_analysis</code> traverses the region tree from where the parent task has privileges down to where the operation is requesting privileges. Whenever we find other operations that are interfering along this path dependencies are registered.</p>
+
+<p>The first thing we do in the function is grab a reference to the parent node in the tree. The parent is set by the application when the region requirement is specified.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">RegionTreeContext</span> <span class="n">ctx</span><span class="p">,</span>
+                                                  <span class="n">Operation</span> <span class="o">*</span><span class="n">op</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="n">idx</span><span class="p">,</span>
+                                                  <span class="n">RegionRequirement</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">,</span>
+                                                  <span class="n">RegionTreePath</span> <span class="o">&amp;</span><span class="n">path</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// If this is a NO_ACCESS, then we&#39;ll have no dependences so we&#39;re done</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">IS_NO_ACCESS</span><span class="p">(</span><span class="n">req</span><span class="p">))</span>
+        <span class="k">return</span><span class="p">;</span>
+
+      <span class="n">RegionNode</span> <span class="o">*</span><span class="n">parent_node</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">parent</span><span class="p">);</span>
+</code></pre></div>
+<p>Next we compute a field mask for the privileges being requested by the region requirement. Note that these fields are specified by an application using an STL structure, but the FieldMask here is computed which is a very efficient way to compare the set of fields against other field sets during the traversal for detecting interference.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="n">FieldMask</span> <span class="n">user_mask</span> <span class="o">=</span> 
+        <span class="n">parent_node</span><span class="o">-&gt;</span><span class="n">column_source</span><span class="o">-&gt;</span><span class="n">get_field_mask</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">privilege_fields</span><span class="p">);</span>
+</code></pre></div>
+<p>Next we create a logical user structure that stores a bunch of information about whats going on. The RegionUsage structure is a compact form of the region requirement that only stores what is necessary for the analysis. The tracing is an optimization that is used to reuse analysis results, but we won&#39;t cover that here today.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// Then compute the logical user</span>
+      <span class="n">LogicalUser</span> <span class="nf">user</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">RegionUsage</span><span class="p">(</span><span class="n">req</span><span class="p">),</span> <span class="n">user_mask</span><span class="p">);</span> 
+      <span class="n">TraceInfo</span> <span class="nf">trace_info</span><span class="p">(</span><span class="n">op</span><span class="o">-&gt;</span><span class="n">already_traced</span><span class="p">(),</span> <span class="n">op</span><span class="o">-&gt;</span><span class="n">get_trace</span><span class="p">(),</span> <span class="n">idx</span><span class="p">,</span> <span class="n">req</span><span class="p">);</span> 
+</code></pre></div>
+<p>Finally we begin the traversal. The traversal is handled by <code>register_logical_node</code>, and we&#39;ll look at this in detail next.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// Finally do the traversal, note that we don&#39;t need to hold the</span>
+      <span class="c1">// context lock since the runtime guarantees that all dependence</span>
+      <span class="c1">// analysis for a single context are performed in order</span>
+      <span class="n">parent_node</span><span class="o">-&gt;</span><span class="n">register_logical_node</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">get_id</span><span class="p">(),</span> <span class="n">user</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">trace_info</span><span class="p">);</span>
+
+      <span class="c1">// Now check to see if we have any simultaneous restrictions</span>
+      <span class="c1">// we need to check</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="k">restricted</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">RestrictedTraverser</span> <span class="n">traverser</span><span class="p">(</span><span class="n">ctx</span><span class="p">.</span><span class="n">get_id</span><span class="p">(),</span> <span class="n">path</span><span class="p">);</span>
+        <span class="n">traverser</span><span class="p">.</span><span class="n">traverse</span><span class="p">(</span><span class="n">parent_node</span><span class="p">);</span>
+        <span class="c1">// Check to see if there was user-level software</span>
+        <span class="c1">// coherence for all of our fields.</span>
+        <span class="n">FieldMask</span> <span class="n">restricted_mask</span> <span class="o">=</span> <span class="n">user_mask</span> <span class="o">-</span> <span class="n">traverser</span><span class="p">.</span><span class="n">get_coherence_mask</span><span class="p">();</span>
+        <span class="c1">// If none of our fields are still restricted</span>
+        <span class="c1">// then we can remove the restricted field on</span>
+        <span class="c1">// our region requirement.  Otherwise we keep</span>
+        <span class="c1">// the restriction.</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">restricted_mask</span><span class="p">)</span>
+          <span class="n">req</span><span class="p">.</span><span class="k">restricted</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span> 
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<h1>Register Logical Node</h1>
+
+<p>We start traversing the tree from the parent&#39;s node (see above). Notice that this isn&#39;t specific to a logical region nor logical partition, but rather handles both cases. This is a recursive function that traverses the tree, and the first thing we do is see if we have reached the destination.</p>
+
+<p>We&#39;ll dissect this function non-linearly to make it a bit easier to display. At a high-level we perform a set of actions on every node, take the recursive path if we haven&#39;t reached our destination, or perform an action at the target. First we check to see if we have arrived at the target node.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeNode</span><span class="o">::</span><span class="n">register_logical_node</span><span class="p">(</span><span class="n">ContextID</span> <span class="n">ctx</span><span class="p">,</span>
+                                               <span class="k">const</span> <span class="n">LogicalUser</span> <span class="o">&amp;</span><span class="n">user</span><span class="p">,</span>
+                                               <span class="n">RegionTreePath</span> <span class="o">&amp;</span><span class="n">path</span><span class="p">,</span>
+                                               <span class="k">const</span> <span class="n">TraceInfo</span> <span class="o">&amp;</span><span class="n">trace_info</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">LogicalState</span> <span class="o">&amp;</span><span class="n">state</span> <span class="o">=</span> <span class="o">*</span><span class="p">(</span><span class="n">logical_states</span><span class="p">.</span><span class="n">lookup_entry</span><span class="p">(</span><span class="n">ctx</span><span class="p">));</span>
+      <span class="k">const</span> <span class="kt">unsigned</span> <span class="n">depth</span> <span class="o">=</span> <span class="n">get_depth</span><span class="p">();</span>
+      <span class="k">const</span> <span class="kt">bool</span> <span class="n">arrived</span> <span class="o">=</span> <span class="o">!</span><span class="n">path</span><span class="p">.</span><span class="n">has_child</span><span class="p">(</span><span class="n">depth</span><span class="p">);</span>
+</code></pre></div>
+<p>Next we skip the work that is done on every node, and show the else case for if we have arrived at the target because its very simple. We just visit the child. There is an open-only optimization, but we&#39;ll discuss that another time.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">else</span> <span class="c1">// We&#39;re still not there, so keep going</span>
+      <span class="p">{</span>
+        <span class="n">Color</span> <span class="n">next_child</span> <span class="o">=</span> <span class="n">path</span><span class="p">.</span><span class="n">get_child</span><span class="p">(</span><span class="n">depth</span><span class="p">);</span>
+        <span class="n">RegionTreeNode</span> <span class="o">*</span><span class="n">child</span> <span class="o">=</span> <span class="n">get_tree_child</span><span class="p">(</span><span class="n">next_child</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">open_only</span><span class="p">)</span>
+          <span class="n">child</span><span class="o">-&gt;</span><span class="n">open_logical_node</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">user</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">trace_info</span><span class="p">.</span><span class="n">already_traced</span><span class="p">);</span>
+        <span class="k">else</span>
+          <span class="n">child</span><span class="o">-&gt;</span><span class="n">register_logical_node</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">user</span><span class="p">,</span> <span class="n">path</span><span class="p">,</span> <span class="n">trace_info</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Next we&#39;ll look at what happens to every node. The first thing is we check to see if any sub-trees are open, that is, they have operations registered on them. We have a single path to our target, but other operations may be using other regions and are interfering. When this happens we close those trees and do analysis.</p>
+
+<p>The LogicalCloser object is a helper for close operations. The <code>siphon_logical_children</code> call examines what needs to be closed, and also reports if the open-only optimization can be used.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// First check to see if we need to do any close operations</span>
+      <span class="c1">// Close up any children which we may have dependences on below</span>
+      <span class="n">LogicalCloser</span> <span class="nf">closer</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">user</span><span class="p">,</span> <span class="n">arrived</span><span class="cm">/*validates*/</span><span class="p">);</span>
+
+      <span class="c1">// There is one special case where we don&#39;t need to actually make</span>
+      <span class="c1">// any close operations. In the case where we have arrived and we</span>
+      <span class="c1">// have READ_WRITE privileges, we know we will always be the first</span>
+      <span class="c1">// one to this node and will do our own physical close, so there is</span>
+      <span class="c1">// no need to register a close operations here.</span>
+      <span class="kt">bool</span> <span class="n">open_only</span> <span class="o">=</span> <span class="n">siphon_logical_children</span><span class="p">(</span><span class="n">closer</span><span class="p">,</span> <span class="n">state</span><span class="p">,</span> <span class="n">user</span><span class="p">.</span><span class="n">field_mask</span><span class="p">,</span>
+                <span class="o">!</span><span class="n">arrived</span> <span class="o">||</span> <span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">user</span><span class="p">.</span><span class="n">usage</span><span class="p">)</span> <span class="o">||</span> <span class="n">IS_REDUCE</span><span class="p">(</span><span class="n">user</span><span class="p">.</span><span class="n">usage</span><span class="p">),</span>
+                                        <span class="n">arrived</span> <span class="o">?</span> <span class="o">-</span><span class="mi">1</span> <span class="o">:</span> <span class="n">path</span><span class="p">.</span><span class="n">get_child</span><span class="p">(</span><span class="n">depth</span><span class="p">));</span>
+</code></pre></div>
+<p>If there were any fields that had to be closed then at this point we register close operations that will do their own dependence analysis. We&#39;ll come back to this later.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// We always need to create and register close operations</span>
+      <span class="c1">// regardless of whether we are tracing or not</span>
+      <span class="c1">// If we&#39;re not replaying a trace we need to do work here</span>
+      <span class="c1">// See if we need to register a close operation</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">closer</span><span class="p">.</span><span class="n">has_closed_fields</span><span class="p">())</span>
+      <span class="p">{</span>
+        <span class="c1">// Generate the close operations         </span>
+        <span class="kt">int</span> <span class="n">next_child</span> <span class="o">=</span> <span class="n">arrived</span> <span class="o">?</span> <span class="o">-</span><span class="mi">1</span> <span class="o">:</span> <span class="n">path</span><span class="p">.</span><span class="n">get_child</span><span class="p">(</span><span class="n">depth</span><span class="p">);</span> 
+        <span class="n">closer</span><span class="p">.</span><span class="n">initialize_close_operations</span><span class="p">(</span><span class="k">this</span><span class="p">,</span> <span class="n">user</span><span class="p">.</span><span class="n">op</span><span class="p">,</span> 
+                                           <span class="n">next_child</span><span class="p">,</span> <span class="n">trace_info</span><span class="p">);</span>
+        <span class="c1">// Perform dependence analysis for all the close operations</span>
+        <span class="n">closer</span><span class="p">.</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">user</span><span class="p">,</span>
+                                           <span class="n">state</span><span class="p">.</span><span class="n">curr_epoch_users</span><span class="p">,</span>
+                                           <span class="n">state</span><span class="p">.</span><span class="n">prev_epoch_users</span><span class="p">);</span>
+        <span class="c1">// Now we can flush out all the users dominated by closes</span>
+        <span class="k">const</span> <span class="n">FieldMask</span> <span class="o">&amp;</span><span class="n">closed_mask</span> <span class="o">=</span> <span class="n">closer</span><span class="p">.</span><span class="n">get_closed_mask</span><span class="p">();</span>
+        <span class="n">filter_prev_epoch_users</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="n">closed_mask</span><span class="p">);</span>
+        <span class="n">filter_curr_epoch_users</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="n">closed_mask</span><span class="p">);</span>
+        <span class="c1">// Now we can add the close operations to the current epoch</span>
+        <span class="n">closer</span><span class="p">.</span><span class="n">register_close_operations</span><span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">curr_epoch_users</span><span class="p">);</span>
+      <span class="p">}</span>
+</code></pre></div>
+<p>The next thing we do is some dependence analysis. To understand what we are going to see next we need to explain a bit more about the logical state that is attached to nodes. The state associated with a node is recorded in <code>LogicalState</code>. In particular, we are interested in the current and previous epoch users:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">FieldState</span><span class="p">,</span><span class="n">LOGICAL_FIELD_STATE_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">field_states</span><span class="p">;</span>
+      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span><span class="n">CURR_LOGICAL_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">curr_epoch_users</span><span class="p">;</span>
+      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span><span class="n">PREV_LOGICAL_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">prev_epoch_users</span><span class="p">;</span>
+</code></pre></div>
+<p>In order to avoid an N^2 cost dependence analysis phase, we use recognize that we don&#39;t actually need to check the dependencies between the current operation and all previous operations. Rather, we can rely on transitivity properties. Based on the privileges being requested and the previous requests, a new operation joining the current epoch either causes all of the current epoch to replace the previous epoch, or it must join the current epoch and also perform analysis on the previous epoch.</p>
+
+<p>The routine <code>perform_dependence_checks</code> does this moving. Effectively what happens is we consider the current epoch first, and decide if the new operation dominates, meaning that there is a full transitive property in affect. If the new operation replaces the current epoch and the current epoch becomes the previous epoch. If not then we join the current epoch and also examine the previous epoch.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// We also always do our dependence analysis even if we have</span>
+      <span class="c1">// already traced because we need to pick up dependences on </span>
+      <span class="c1">// any dynamic close operations that we need to do</span>
+      <span class="c1">// Now that we registered any close operation, do our analysis</span>
+      <span class="n">FieldMask</span> <span class="n">dominator_mask</span> <span class="o">=</span> 
+             <span class="n">perform_dependence_checks</span><span class="o">&lt;</span><span class="n">CURR_LOGICAL_ALLOC</span><span class="p">,</span><span class="nb">false</span><span class="o">&gt;</span><span class="p">(</span><span class="n">user</span><span class="p">,</span>
+               <span class="n">state</span><span class="p">.</span><span class="n">curr_epoch_users</span><span class="p">,</span> <span class="n">user</span><span class="p">.</span><span class="n">field_mask</span><span class="p">,</span> <span class="n">arrived</span><span class="cm">/*validates*/</span><span class="p">);</span>
+      <span class="n">FieldMask</span> <span class="n">non_dominated_mask</span> <span class="o">=</span> <span class="n">user</span><span class="p">.</span><span class="n">field_mask</span> <span class="o">-</span> <span class="n">dominator_mask</span><span class="p">;</span>
+
+      <span class="c1">// For the fields that weren&#39;t dominated, we have to check</span>
+      <span class="c1">// those fields against the previous epoch&#39;s users</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!!</span><span class="n">non_dominated_mask</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">perform_dependence_checks</span><span class="o">&lt;</span><span class="n">PREV_LOGICAL_ALLOC</span><span class="p">,</span><span class="nb">false</span><span class="o">&gt;</span><span class="p">(</span><span class="n">user</span><span class="p">,</span>
+            <span class="n">state</span><span class="p">.</span><span class="n">prev_epoch_users</span><span class="p">,</span> <span class="n">non_dominated_mask</span><span class="p">,</span> <span class="n">arrived</span><span class="cm">/*validates*/</span><span class="p">);</span>
+      <span class="p">}</span>
+</code></pre></div>
+<p>Now we just have a bit more work to do if we arrived at the destination node. If we had any fields in our dominator mask, then we can filter the epochs based on the new user coming in. Finally we set a mapping reference which is used to prevent an operation that has run and possibly even completed from being reclaimed if there are other references to it.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">if</span> <span class="p">(</span><span class="n">arrived</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="c1">// If we dominated and this is our final destination then we </span>
+        <span class="c1">// can filter the operations since we actually do dominate them</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!!</span><span class="n">dominator_mask</span><span class="p">)</span>
+        <span class="p">{</span>
+          <span class="c1">// Dominator mask is not empty</span>
+          <span class="c1">// Mask off all the dominated fields from the previous set</span>
+          <span class="c1">// of epoch users and remove any previous epoch users</span>
+          <span class="c1">// that were totally dominated</span>
+          <span class="n">filter_prev_epoch_users</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="n">dominator_mask</span><span class="p">);</span> 
+          <span class="c1">// Mask off all dominated fields from current epoch users and move</span>
+          <span class="c1">// them to prev epoch users.  If all fields masked off, then remove</span>
+          <span class="c1">// them from the list of current epoch users.</span>
+          <span class="n">filter_curr_epoch_users</span><span class="p">(</span><span class="n">state</span><span class="p">,</span> <span class="n">dominator_mask</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="c1">// Here is the only difference with tracing.  If we already</span>
+        <span class="c1">// traced then we don&#39;t need to register ourselves as a user</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">trace_info</span><span class="p">.</span><span class="n">already_traced</span><span class="p">)</span>
+        <span class="p">{</span>
+          <span class="c1">// Register ourself with as a current user of this region</span>
+          <span class="c1">// Record a mapping reference on this operation</span>
+          <span class="n">user</span><span class="p">.</span><span class="n">op</span><span class="o">-&gt;</span><span class="n">add_mapping_reference</span><span class="p">(</span><span class="n">user</span><span class="p">.</span><span class="n">gen</span><span class="p">);</span>
+          <span class="c1">// Add ourselves to the current epoch</span>
+          <span class="n">state</span><span class="p">.</span><span class="n">curr_epoch_users</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">user</span><span class="p">);</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+</code></pre></div>
+<h1>Performing Dependence Checks</h1>
+
+<p>Now we&#39;ll check out <code>perform_dependence_checks</code>. We can use <code>user</code>, the current operation, and <code>prev_users</code>, which comes from the set of users in an epoch that we just saw. The <code>check_mask</code> limits the set of fields that analysis is performed on.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">template</span><span class="o">&lt;</span><span class="n">AllocationType</span> <span class="n">ALLOC</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">HAS_SKIP</span><span class="o">&gt;</span>
+    <span class="cm">/*static*/</span> <span class="n">FieldMask</span> <span class="n">RegionTreeNode</span><span class="o">::</span><span class="n">perform_dependence_checks</span><span class="p">(</span>
+      <span class="k">const</span> <span class="n">LogicalUser</span> <span class="o">&amp;</span><span class="n">user</span><span class="p">,</span> 
+      <span class="k">typename</span> <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span> <span class="n">ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="o">&amp;</span><span class="n">prev_users</span><span class="p">,</span>
+      <span class="k">const</span> <span class="n">FieldMask</span> <span class="o">&amp;</span><span class="n">check_mask</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">validates_regions</span><span class="p">,</span>
+      <span class="n">Operation</span> <span class="o">*</span><span class="n">to_skip</span> <span class="cm">/*= NULL*/</span><span class="p">,</span> <span class="n">GenerationID</span> <span class="n">skip_gen</span> <span class="cm">/* = 0*/</span><span class="p">)</span>
+    <span class="p">{</span>
+</code></pre></div>
+<p>So this function really represents the indivisible actions in dependence analysis. This function is pretty big, so I&#39;ll just toss in the most important part. We iterate over all of the previous users, and see if we need to register a dependence for our current user.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">for</span> <span class="p">(</span><span class="k">typename</span> <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span> <span class="n">ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span><span class="o">::</span><span class="n">iterator</span> 
+            <span class="n">it</span> <span class="o">=</span> <span class="n">prev_users</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">prev_users</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="cm">/*nothing*/</span><span class="p">)</span>
+      <span class="p">{</span>
+</code></pre></div>
+<p>Are there any overlapping fields? If there are is overlap, then we need to continue doing analysis. However, if there aren&#39;t, we can just all the way to bottom and go on to the next user (we&#39;ll come back to that). So, when we have overlapping fields:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="n">FieldMask</span> <span class="n">overlap</span> <span class="o">=</span> <span class="n">user_check_mask</span> <span class="o">&amp;</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">field_mask</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!!</span><span class="n">overlap</span><span class="p">)</span>
+        <span class="p">{</span>
+</code></pre></div>
+<p>Are there dependencies based on user privileges? If there aren&#39;t any dependencies, then we just update masks and move on.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">          <span class="n">DependenceType</span> <span class="n">dtype</span> <span class="o">=</span> <span class="n">check_dependence_type</span><span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">usage</span><span class="p">,</span> <span class="n">user</span><span class="p">.</span><span class="n">usage</span><span class="p">);</span>
+          <span class="kt">bool</span> <span class="n">validate</span> <span class="o">=</span> <span class="n">validates_regions</span><span class="p">;</span>
+          <span class="k">switch</span> <span class="p">(</span><span class="n">dtype</span><span class="p">)</span>
+            <span class="k">case</span> <span class="nl">NO_DEPENDENCE</span><span class="p">:</span>
+              <span class="p">{</span>
+                <span class="c1">// No dependence so remove bits from the dominator mask</span>
+                <span class="n">dominator_mask</span> <span class="o">-=</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">field_mask</span><span class="p">;</span>
+                <span class="k">break</span><span class="p">;</span>
+              <span class="p">}</span>
+</code></pre></div>
+<p>Some other cases here, but we&#39;ll skip these today.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">            <span class="k">case</span> <span class="nl">ANTI_DEPENDENCE</span><span class="p">:</span>
+            <span class="k">case</span> <span class="nl">ATOMIC_DEPENDENCE</span><span class="p">:</span>
+            <span class="k">case</span> <span class="nl">SIMULTANEOUS_DEPENDENCE</span><span class="p">:</span>
+            <span class="k">case</span> <span class="nl">PROMOTED_DEPENDENCE</span><span class="p">:</span>
+              <span class="p">{</span>
+                <span class="c1">// Mark that these kinds of dependences are not allowed</span>
+                <span class="c1">// to validate region inputs</span>
+                <span class="n">validate</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+                <span class="c1">// No break so we register dependences just like</span>
+                <span class="c1">// a true dependence</span>
+              <span class="p">}</span>
+</code></pre></div>
+<p>Otherwise we have a true dependence and we&#39;ll try to register the dependence on the previous operation.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">            <span class="k">case</span> <span class="nl">TRUE_DEPENDENCE</span><span class="p">:</span>
+              <span class="p">{</span>
+                <span class="c1">// Do this after the logging since we might </span>
+                <span class="c1">// update the iterator.</span>
+                <span class="c1">// If we can validate a region record which of our</span>
+                <span class="c1">// predecessors regions we are validating, otherwise</span>
+                <span class="c1">// just register a normal dependence</span>
+                <span class="k">if</span> <span class="p">(</span><span class="n">user</span><span class="p">.</span><span class="n">op</span><span class="o">-&gt;</span><span class="n">register_region_dependence</span><span class="p">(</span><span class="n">user</span><span class="p">.</span><span class="n">idx</span><span class="p">,</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">op</span><span class="p">,</span> 
+                                                        <span class="n">it</span><span class="o">-&gt;</span><span class="n">gen</span><span class="p">,</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">idx</span><span class="p">,</span>
+                                                        <span class="n">dtype</span><span class="p">,</span> <span class="n">validate</span><span class="p">,</span>
+                                                        <span class="n">overlap</span><span class="p">))</span>
+                <span class="p">{</span>
+
+                  <span class="c1">// Now we can prune it from the list and continue</span>
+                  <span class="n">it</span> <span class="o">=</span> <span class="n">prev_users</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">it</span><span class="p">);</span>
+                  <span class="k">continue</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="k">else</span>
+                <span class="p">{</span>
+                  <span class="c1">// hasn&#39;t commited, reset timeout and continue</span>
+                  <span class="n">it</span><span class="o">-&gt;</span><span class="n">timeout</span> <span class="o">=</span> <span class="n">LogicalUser</span><span class="o">::</span><span class="n">TIMEOUT</span><span class="p">;</span>
+                  <span class="n">it</span><span class="o">++</span><span class="p">;</span>
+                  <span class="k">continue</span><span class="p">;</span>
+                <span class="p">}</span>
+                <span class="k">break</span><span class="p">;</span>
+              <span class="p">}</span>
+</code></pre></div>
+<h1>Check Dependence Type</h1>
+
+<p>Above we saw <code>check_dependence_type</code> which figured out how to region users interfered (if at all). The policy for that is implemented in <code>legion_utilities.h</code>. If both read-only, then no dependencies.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">static</span> <span class="kr">inline</span> <span class="n">DependenceType</span> <span class="nf">check_dependence_type</span><span class="p">(</span><span class="k">const</span> <span class="n">RegionUsage</span> <span class="o">&amp;</span><span class="n">u1</span><span class="p">,</span>
+                                                       <span class="k">const</span> <span class="n">RegionUsage</span> <span class="o">&amp;</span><span class="n">u2</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// Two readers are never a dependence</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+      <span class="p">{</span>
+        <span class="k">return</span> <span class="n">check_for_promotion</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span> <span class="n">NO_DEPENDENCE</span><span class="p">);</span>
+      <span class="p">}</span>
+</code></pre></div>
+<p>If both reduction with the same op, then they usually don&#39;t have a dependence:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">else</span> <span class="nf">if</span> <span class="p">(</span><span class="n">IS_REDUCE</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_REDUCE</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+      <span class="p">{</span>
+        <span class="c1">// If they are the same kind of reduction, no dependence, </span>
+        <span class="c1">// otherwise true dependence</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">u1</span><span class="p">.</span><span class="n">redop</span> <span class="o">==</span> <span class="n">u2</span><span class="p">.</span><span class="n">redop</span><span class="p">)</span>
+          <span class="k">return</span> <span class="n">check_for_promotion</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span> <span class="n">NO_DEPENDENCE</span><span class="p">);</span>
+        <span class="k">else</span>
+          <span class="k">return</span> <span class="n">TRUE_DEPENDENCE</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">else</span>
+      <span class="p">{</span>
+</code></pre></div>
+<p>Then all the cases for at least one write. All the cases are just enumerated and tested. Check out the logic.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="c1">// If anything exclusive </span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">IS_EXCLUSIVE</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">||</span> <span class="n">IS_EXCLUSIVE</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="k">return</span> <span class="n">check_for_anti_dependence</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span><span class="n">u2</span><span class="p">,</span><span class="n">TRUE_DEPENDENCE</span><span class="cm">/*default*/</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="c1">// Anything atomic (at least one is a write)</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">||</span> <span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="c1">// If they&#39;re both atomics, return an atomic dependence</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+          <span class="p">{</span>
+            <span class="k">return</span> <span class="n">check_for_anti_dependence</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span><span class="n">u2</span><span class="p">,</span>
+                                             <span class="n">ATOMIC_DEPENDENCE</span><span class="cm">/*default*/</span><span class="p">);</span> 
+          <span class="p">}</span>
+          <span class="c1">// If the one that is not an atomic is a read, we&#39;re also ok</span>
+          <span class="k">else</span> <span class="k">if</span> <span class="p">((</span><span class="o">!</span><span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">u1</span><span class="p">))</span> <span class="o">||</span>
+                   <span class="p">(</span><span class="o">!</span><span class="n">IS_ATOMIC</span><span class="p">(</span><span class="n">u2</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">u2</span><span class="p">)))</span>
+          <span class="p">{</span>
+            <span class="k">return</span> <span class="n">check_for_promotion</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span> <span class="n">NO_DEPENDENCE</span><span class="p">);</span>
+          <span class="p">}</span>
+          <span class="c1">// Everything else is a dependence</span>
+          <span class="k">return</span> <span class="n">check_for_anti_dependence</span><span class="p">(</span><span class="n">u1</span><span class="p">,</span><span class="n">u2</span><span class="p">,</span><span class="n">TRUE_DEPENDENCE</span><span class="cm">/*default*/</span><span class="p">);</span>
+        <span class="p">}</span>
+        <span class="c1">// If either is simultaneous we have a simultaneous dependence</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">IS_SIMULT</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">||</span> <span class="n">IS_SIMULT</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="k">return</span> <span class="n">SIMULTANEOUS_DEPENDENCE</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="k">if</span> <span class="p">(</span><span class="n">IS_RELAXED</span><span class="p">(</span><span class="n">u1</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="n">IS_RELAXED</span><span class="p">(</span><span class="n">u2</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="c1">// TODO: Make this truly relaxed, right now it is the </span>
+          <span class="c1">// same as simultaneous</span>
+          <span class="k">return</span> <span class="n">SIMULTANEOUS_DEPENDENCE</span><span class="p">;</span>
+          <span class="c1">// This is what it should be: return NO_DEPENDENCE;</span>
+          <span class="c1">// What needs to be done:</span>
+          <span class="c1">// - RegionNode::update_valid_instances needs to allow multiple </span>
+          <span class="c1">//               outstanding writers</span>
+          <span class="c1">// - RegionNode needs to detect relaxed case and make copies from all </span>
+          <span class="c1">//              relaxed instances to non-relaxed instance</span>
+        <span class="p">}</span>
+        <span class="c1">// We should never make it here</span>
+        <span class="n">assert</span><span class="p">(</span><span class="nb">false</span><span class="p">);</span>
+        <span class="k">return</span> <span class="n">NO_DEPENDENCE</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">}</span> 
+</code></pre></div>
+<h1>Registering Region Dependencies</h1>
+
+<p>Now let&#39;s check out the code for when we register a dependence. Register a mapping dependence between this operation and another operation. There are some special cases at the beginning, but usually we make it to <code>perform_registration</code>. The big thing here is that registration is performed on the target operation. The key thing here is that we update the count of the number of outstanding mapping dependencies. When that count goes to zero, that&#39;s how we move onto triggering mapping.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">bool</span> <span class="n">Operation</span><span class="o">::</span><span class="n">register_region_dependence</span><span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span><span class="p">,</span> <span class="n">Operation</span> <span class="o">*</span><span class="n">target</span><span class="p">,</span>
+                                          <span class="n">GenerationID</span> <span class="n">target_gen</span><span class="p">,</span> 
+                                          <span class="kt">unsigned</span> <span class="n">target_idx</span><span class="p">,</span>
+                                          <span class="n">DependenceType</span> <span class="n">dtype</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">validates</span><span class="p">,</span>
+                                          <span class="k">const</span> <span class="n">FieldMask</span> <span class="o">&amp;</span><span class="n">dependent_mask</span><span class="p">)</span>
+    <span class="p">{</span>
+        <span class="p">...</span>
+
+        <span class="n">Event</span> <span class="n">all_mapped</span> <span class="o">=</span> <span class="n">Event</span><span class="o">::</span><span class="n">NO_EVENT</span><span class="p">;</span>
+        <span class="n">prune</span> <span class="o">=</span> <span class="n">target</span><span class="o">-&gt;</span><span class="n">perform_registration</span><span class="p">(</span><span class="n">target_gen</span><span class="p">,</span> <span class="k">this</span><span class="p">,</span> <span class="n">gen</span><span class="p">,</span>
+                                                <span class="n">registered_dependence</span><span class="p">,</span>
+                                                <span class="n">outstanding_mapping_deps</span><span class="p">,</span>
+                                                <span class="n">outstanding_speculation_deps</span><span class="p">,</span>
+                                                <span class="n">all_mapped</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">all_mapped</span><span class="p">.</span><span class="n">exists</span><span class="p">())</span>
+          <span class="n">dependent_children_mapped</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">all_mapped</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">registered_dependence</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">incoming</span><span class="p">[</span><span class="n">target</span><span class="p">]</span> <span class="o">=</span> <span class="n">target_gen</span><span class="p">;</span>
+        <span class="c1">// If we registered a mapping dependence then we can verify</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">validates</span><span class="p">)</span>
+          <span class="n">verify_regions</span><span class="p">[</span><span class="n">target</span><span class="p">].</span><span class="n">insert</span><span class="p">(</span><span class="n">idx</span><span class="p">);</span>
+      <span class="p">}</span>
+
+     <span class="p">...</span>
+</code></pre></div>
+<p>That&#39;s all pretty complicated. I think it&#39;s time to go back and look at a write-up about what is going on conceptually in the various publications associated with Legion, but hopefully this gives a decent overview of how to walk through the code and the parts that are important.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

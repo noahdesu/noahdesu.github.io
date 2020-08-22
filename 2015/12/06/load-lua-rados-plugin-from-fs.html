@@ -1,0 +1,647 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Load Lua RADOS Classes From Local File System</title>
+  <meta name="description" content="">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/12/06/load-lua-rados-plugin-from-fs.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Load Lua RADOS Classes From Local File System</h1>
+    <p class="post-meta">Dec 6, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <p><strong>tl;dr</strong>: <a href="/2013/02/21/writing-cls-lua-handlers.html">Object classes in RADOS written in Lua</a> have up until now been limited to scripts that are embedded into every client request. This post describes how we have extended RADOS to load Lua scripts from the file system, supporting a new way to manage object interfaces written in Lua.</p>
+
+<p>The code described in this post can found in the <code>cls-lua</code> branch of the
+upstream Ceph repository: <a href="https://github.com/ceph/ceph/tree/cls-lua">https://github.com/ceph/ceph/tree/cls-lua</a>.</p>
+
+<h1>Introduction</h1>
+
+<p>The RADOS object store that powers Ceph supports an <em>active storage</em>-like feature called <em>object classes</em> that allow custom object interfaces to be defined. Object classes define a set of methods, each of which can perform arbitrary mutations on objects within a transaction context. The native object class interface is C++, and deploying object classes that are not in the upstream Ceph release means compiling and managing binary libraries and ensuring version compatibility. Alternatively, developers can <a href="/2013/02/21/writing-cls-lua-handlers.html">define object classes in the embedded language Lua</a> allowing for object classes to be defined on-the-fly. However in the current design every client request must be augmented with the Lua script to be executed. In this post we will describe a new form of interface management that allows object classes written in Lua to be loaded from the file system, significantly increasing flexibility in interface management.</p>
+
+<p>The remainder of this post will examine how existing object class modules are loaded into a running OSD, how Lua object classes are defined by attaching a Lua script to each request, and finally how we implement Lua class loading from the file system.</p>
+
+<h2>Object Class Loader</h2>
+
+<p>I&#39;ll now briefly describe how object classes are currently managed and loaded by Ceph. We&#39;ll adopt a similar model for Lua scripts. The following is a directory listing of the object classes that are in the current upstream Ceph tree. Each directory corresponds to a separate class:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto ceph<span class="o">]</span><span class="nv">$ </span>ls -l src/cls/
+total 84
+drwxrwxr-x. <span class="m">4</span> nwatkins nwatkins <span class="m">4096</span> Dec  <span class="m">5</span> 12:05 cephfs
+drwxrwxr-x. <span class="m">4</span> nwatkins nwatkins <span class="m">4096</span> Dec  <span class="m">6</span> 09:21 journal
+drwxrwxr-x. <span class="m">4</span> nwatkins nwatkins <span class="m">4096</span> Dec  <span class="m">3</span> 12:09 lock
+drwxrwxr-x. <span class="m">4</span> nwatkins nwatkins <span class="m">4096</span> Dec  <span class="m">3</span> 12:07 log
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins <span class="m">4265</span> Dec  <span class="m">5</span> 10:40 Makefile-server.am
+drwxrwxr-x. <span class="m">4</span> nwatkins nwatkins <span class="m">4096</span> Dec  <span class="m">3</span> 17:17 numops
+...
+</code></pre></div>
+<p>Each class is compiled into a shared library that can be loaded into the OSD executable at runtime. The following is a directory listing of the installation path for each object class:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto ceph<span class="o">]</span><span class="nv">$ </span>ls -l /usr/lib/rados-classes/*.so <span class="p">|</span> grep cls
+-rwxr-xr-x. <span class="m">1</span> root root   <span class="m">241360</span> Dec  <span class="m">5</span> 10:45 /usr/lib/rados-classes/libcls_cephfs.so
+-rwxr-xr-x. <span class="m">1</span> root root   <span class="m">727840</span> Dec  <span class="m">5</span> 10:45 /usr/lib/rados-classes/libcls_journal.so
+-rwxr-xr-x. <span class="m">1</span> root root  <span class="m">1176504</span> Dec  <span class="m">5</span> 10:45 /usr/lib/rados-classes/libcls_kvs.so
+-rwxr-xr-x. <span class="m">1</span> root root   <span class="m">765960</span> Dec  <span class="m">5</span> 10:45 /usr/lib/rados-classes/libcls_lock.so
+-rwxr-xr-x. <span class="m">1</span> root root   <span class="m">482920</span> Dec  <span class="m">5</span> 10:45 /usr/lib/rados-classes/libcls_log.so
+...
+</code></pre></div>
+<p>The naming convention of the libraries is important. The OSD assumes a naming convention in which an object class named <code>foo</code> can be loaded from the file <code>libcls_foo.so</code>. Concretely, when a RADOS client runs the command:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">IoCtx</span><span class="o">::</span><span class="n">exec</span><span class="p">(</span><span class="s">&quot;oid&quot;</span><span class="p">,</span> <span class="s">&quot;foo&quot;</span><span class="p">,</span> <span class="s">&quot;foo-method&quot;</span><span class="p">,</span> <span class="p">...)</span>
+</code></pre></div>
+<p>The OSD will check if the <code>foo</code> class has already been loaded, and if not, it will attempt to locate a shared library named <code>libcls_foo.so</code> and use <code>dlopen</code> to dynamically insert the library into the running executable. Once the object class module has been loaded methods exported by the module may be invoked on behalf of the client (<code>foo-method</code> in the above example).</p>
+
+<h2>Loading Lua Classes</h2>
+
+<p>The Lua object class feature is not a native OSD feature. Rather, it is implemented as a statically loaded object class written in C++ that is used to simulate the presence of dynamically defined object interfaces. It exists along side other object classes:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto ceph<span class="o">]</span><span class="nv">$ </span>ls -l src/cls/lua
+total 1996
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins   <span class="m">20472</span> Dec  <span class="m">4</span> 15:08 cls_lua.cc
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins    <span class="m">1823</span> Dec  <span class="m">4</span> 14:59 cls_lua_client.cc
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins     <span class="m">412</span> Dec  <span class="m">4</span> 14:59 cls_lua_client.hpp
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins     <span class="m">354</span> Dec  <span class="m">4</span> 14:59 cls_lua.h
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins    <span class="m">3739</span> Dec  <span class="m">4</span> 14:59 lua_bufferlist.cc
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins   <span class="m">22899</span> Dec  <span class="m">4</span> 14:59 lua_cmsgpack.c
+</code></pre></div>
+<p>And is compiled and loaded like any other object class:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="p">[</span><span class="n">nwatkins</span><span class="err">@</span><span class="n">kyoto</span> <span class="n">ceph</span><span class="p">]</span><span class="err">$</span> <span class="n">ls</span> <span class="o">-</span><span class="n">l</span> <span class="o">/</span><span class="n">usr</span><span class="o">/</span><span class="n">lib</span><span class="o">/</span><span class="n">rados</span><span class="o">-</span><span class="n">classes</span><span class="o">/*</span><span class="p">.</span><span class="n">so</span> <span class="o">|</span> <span class="n">grep</span> <span class="n">cls_lua</span>
+<span class="o">-</span><span class="n">rwxr</span><span class="o">-</span><span class="n">xr</span><span class="o">-</span><span class="n">x</span><span class="p">.</span> <span class="mi">1</span> <span class="n">root</span> <span class="n">root</span>   <span class="mi">241360</span> <span class="n">Dec</span>  <span class="mi">5</span> <span class="mi">10</span><span class="o">:</span><span class="mi">45</span> <span class="o">/</span><span class="n">usr</span><span class="o">/</span><span class="n">lib</span><span class="o">/</span><span class="n">rados</span><span class="o">-</span><span class="n">classes</span><span class="o">/</span><span class="n">libcls_lua</span><span class="p">.</span><span class="n">so</span>
+</code></pre></div>
+<p>The <code>lua</code> object class is invoked like any other object class:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">IoCtx</span><span class="o">::</span><span class="n">exec</span><span class="p">(</span><span class="s">&quot;oid&quot;</span><span class="p">,</span> <span class="s">&quot;lua&quot;</span><span class="p">,</span> <span class="s">&quot;eval_json&quot;</span><span class="p">,</span> <span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">);</span>
+</code></pre></div>
+<p>What is happening here? The <code>eval_json</code> method is being called on the <code>lua</code> class which specifies that the <code>input</code> should be assumed to be a JSON encoded string (there are other encoding available such as <code>bufferlist</code> and <code>msgpack</code>). The JSON string is simply the Lua script, actual method input, and the method in the Lua script to invoke. Here is an example of the input (using Python dictionary notation). The Lua script shown below treats the input as a string and returns the string with each character capitalized:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">cmd</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="s">&quot;script&quot;</span><span class="p">:</span> <span class="s">&quot;&quot;&quot;</span>
+<span class="s">      function upper(input, output)</span>
+<span class="s">        input_str = input:str()</span>
+<span class="s">        upper_str = string.upper(input_str)</span>
+<span class="s">        output:append(upper_str)</span>
+<span class="s">      end</span>
+<span class="s">      cls.register(upper)</span>
+<span class="s">  &quot;&quot;&quot;</span><span class="p">,</span>
+  <span class="s">&quot;handler&quot;</span><span class="p">:</span> <span class="s">&quot;upper&quot;</span><span class="p">,</span>
+  <span class="s">&quot;input&quot;</span><span class="p">:</span> <span class="s">&quot;this string was in lower case&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The encoded input can be provided to <code>IoCtx::exec</code>:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">ret</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">ioctx</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">&#39;oid&#39;</span><span class="p">,</span> <span class="s">&#39;lua&#39;</span><span class="p">,</span> <span class="s">&#39;eval_json&#39;</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">cmd</span><span class="p">))</span>
+<span class="k">print</span> <span class="n">data</span><span class="p">[:</span><span class="n">ret</span><span class="p">]</span>
+</code></pre></div>
+<p>And when run, we see the output that we expect:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">[nwatkins@kyoto src]$ python test.py
+THIS STRING WAS IN LOWER CASE
+</code></pre></div>
+<p>Rather than using the <code>lua</code> class directly, clients typically use a thin wrapper around <code>IoCtx::exec</code> that performs input encoding, providing the appearance that RADOS provides access to dynamically defined object classes. There are a couple drawbacks to this approach:</p>
+
+<ol>
+<li>Clients must send a script along with each request</li>
+<li>The vanilla <code>exec</code> interface cannot invoke dynamic classes directly</li>
+</ol>
+
+<p>Both of these issues are limiting. Providing a script with each request can be expensive and may introduce a major hassle for applications that must begin managing each interface. The second issue limits the power of dynamic interfaces. Existing applications that are written assuming a given a object class would need to be recompiled to switch to Lua defined classes because they would need use the <code>lua</code> class. However, it would be nice to be able to simply swap out the implementation and allow the application to continue referencing the same object class methods.</p>
+
+<p>We address both of these issues in the remainder of this post. To address the first issue we introduce the ability for Lua scripts to be loaded from a local file system in a manner analogous to how native C++ modules are managed. The second issue is effectively solved for free when object classes are allowed to be resolved to separate Lua scripts.</p>
+
+<h1>The Goal</h1>
+
+<p>From a management perspective the goal of this project is to allow object classes written in Lua to be saved to and loaded from the file system with identical semantics to the existing infrastructure for loading native C++ object class modules. In the same way that object classes written in C++ can be compiled and installed manually, in this post we only consider Lua scripts managed in the Ceph tree (but out-of-tree management is much easier with Lua scripts as they do not require compilation).</p>
+
+<p>We stash the Lua scripts in the same directory structure as the native extensions. Below are three object classes, one native and two written in Lua. The native object class <code>hello</code> is mirrored by the Lua object class named <code>hellolua</code> which will be used as a demonstration class. The <code>compress</code> class is in its own directory and is a Lua class that contains data compression methods.</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto ceph<span class="o">]</span><span class="nv">$ </span>ls -l src/cls/hello/
+total 480
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins  <span class="m">10328</span> Dec  <span class="m">3</span> 11:10 cls_hello.cc
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins    <span class="m">289</span> Dec  <span class="m">3</span> 12:24 cls_hello.lo
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins    <span class="m">230</span> Dec  <span class="m">4</span> 13:57 cls_hellolua.lua
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins <span class="m">468864</span> Dec  <span class="m">3</span> 12:24 cls_hello.o
+<span class="o">[</span>nwatkins@kyoto ceph<span class="o">]</span><span class="nv">$ </span>ls -l src/cls/compress/
+total 0
+-rw-rw-r--. <span class="m">1</span> nwatkins nwatkins <span class="m">0</span> Dec  <span class="m">6</span> 11:46 cls_compress.lua
+</code></pre></div>
+<p>Lua classes are installed like their native counterparts, although Lua scripts are installed in <code>/usr/share/ceph/rados-classes</code> as opposed to <code>/usr/lib/rados-classes</code> used for architecture-dependent binaries. The naming convention for Lua scripts is used for resolving class names to files, and native classes with the same name take precedence. Like native classes, Lua scripts are only loaded once. Changes to any Lua scripts will be reflected after an OSD restart (note that this restriction isn&#39;t fundamental and could be easily removed. Shipping a Lua script with each request still retains its dynamic nature, too).</p>
+
+<p>Next we&#39;ll examine the implementation of this feature set.</p>
+
+<h1>Implementation</h1>
+
+<p>First we&#39;ll cover basic changes needed to install the Lua scripts. First some automake magic that will install the Lua scripts into the <code>datadir</code> (typically <code>/usr/share/</code>):</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/Makefile-env.am b/src/Makefile-env.am</span>
+<span class="gh">index 3d8a252..0e265d8 100644</span>
+<span class="gd">--- a/src/Makefile-env.am</span>
+<span class="gi">+++ b/src/Makefile-env.am</span>
+<span class="gu">@@ -20,6 +20,7 @@ lib_LTLIBRARIES =</span>
+ noinst_LTLIBRARIES = 
+ noinst_LIBRARIES =
+ radoslib_LTLIBRARIES =
+<span class="gi">+dist_radoslua_DATA =</span>
+
+ # like bin_PROGRAMS, but these targets are only built for debug builds
+ bin_DEBUGPROGRAMS =
+<span class="gu">@@ -286,4 +287,5 @@ DENCODER_DEPS =</span>
+
+
+ radoslibdir = $(libdir)/rados-classes
+<span class="gi">+radosluadir = $(datadir)/ceph/rados-classes</span>
+
+<span class="gh">diff --git a/src/cls/Makefile-server.am b/src/cls/Makefile-server.am</span>
+<span class="gh">index 2221d6c..5b95f84 100644</span>
+<span class="gd">--- a/src/cls/Makefile-server.am</span>
+<span class="gi">+++ b/src/cls/Makefile-server.am</span>
+<span class="gu">@@ -92,4 +92,7 @@ libcls_lua_la_LDFLAGS = ${AM_LDFLAGS} -version-info 1:0:0 -export-symbols-regex</span>
+ radoslib_LTLIBRARIES += libcls_lua.la
+ endif
+
+<span class="gi">+dist_radoslua_DATA += \</span>
+<span class="gi">+    cls/hello/cls_hellolua.lua</span>
+<span class="gi">+</span>
+ endif # WITH_OSD
+</code></pre></div>
+<p>Similar changes need to be made for the CMake build system, Debian, and RPM packaging but these are omitted from this post. Next we need to be able to refer to the directory containing the Lua scripts so we can load them dynamically at runtime. For this we define a configuration option populated by the automake variable specifying the installation location:</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/Makefile-env.am b/src/Makefile-env.am</span>
+<span class="gh">index 0e265d8..6672d37 100644</span>
+<span class="gd">--- a/src/Makefile-env.am</span>
+<span class="gi">+++ b/src/Makefile-env.am</span>
+<span class="gu">@@ -87,6 +87,7 @@ AM_COMMON_CPPFLAGS = \</span>
+        -D_GNU_SOURCE \
+        -DCEPH_LIBDIR=\&quot;${libdir}\&quot; \
+        -DCEPH_PKGLIBDIR=\&quot;${pkglibdir}\&quot; \
+<span class="gi">+       -DCEPH_DATADIR=\&quot;${datadir}\&quot; \</span>
+        -DGTEST_USE_OWN_TR1_TUPLE=0
+
+ if LINUX
+<span class="gh">diff --git a/src/common/config_opts.h b/src/common/config_opts.h</span>
+<span class="gh">index a19cc5d..86eb42f 100644</span>
+<span class="gd">--- a/src/common/config_opts.h</span>
+<span class="gi">+++ b/src/common/config_opts.h</span>
+<span class="gu">@@ -695,6 +695,7 @@ OPTION(osd_deep_scrub_stride, OPT_INT, 524288)</span>
+ OPTION(osd_deep_scrub_update_digest_min_age, OPT_INT, 2*60*60)   // objects must be this old (seconds) before we update the whole-object digest on scrub
+ OPTION(osd_scan_list_ping_tp_interval, OPT_U64, 100)
+ OPTION(osd_class_dir, OPT_STR, CEPH_LIBDIR &quot;/rados-classes&quot;) // where rados plugins are stored
+<span class="gi">+OPTION(osd_lua_class_dir, OPT_STR, CEPH_DATADIR &quot;/ceph/rados-classes&quot;) // where rados lua plugins are stored</span>
+ OPTION(osd_open_classes_on_start, OPT_BOOL, true)
+ OPTION(osd_check_for_log_corruption, OPT_BOOL, false)
+ OPTION(osd_use_stale_snap, OPT_BOOL, false)
+</code></pre></div>
+<h2>Loading Lua Scripts From File System</h2>
+
+<p>We&#39;ll describe the implementation by tracing the execution of a <code>IoCtx::exec</code> operation and describing the changes required along that execution path. The first important stop is when the OSD performs pre-processing on the operation which obtains a reference to the object class requested, and optionally loads the class if it hasn&#39;t already been loaded:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">;</span>
+<span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="n">class_handler</span><span class="o">-&gt;</span><span class="n">open_class</span><span class="p">(</span><span class="n">cname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cls</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">derr</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; open got &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cpp_strerror</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">r</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+  <span class="k">else</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EIO</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Class Setup</h3>
+
+<p>The <code>open_class</code> method performs a lookup on the class name which will implicitly create a reference to a class with the name, but may not yet load it. Initially a class is not in the <code>CLASS_OPEN</code> state, so the call to <code>open_class</code> will attempt to load the class.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">ClassHandler</span><span class="o">::</span><span class="n">open_class</span><span class="p">(</span><span class="k">const</span> <span class="n">string</span><span class="o">&amp;</span> <span class="n">cname</span><span class="p">,</span> <span class="n">ClassData</span> <span class="o">**</span><span class="n">pcls</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">Mutex</span><span class="o">::</span><span class="n">Locker</span> <span class="n">lock</span><span class="p">(</span><span class="n">mutex</span><span class="p">);</span>
+  <span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span> <span class="o">=</span> <span class="n">_get_class</span><span class="p">(</span><span class="n">cname</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">!=</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_OPEN</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="n">_load_class</span><span class="p">(</span><span class="n">cls</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">r</span><span class="p">)</span>
+      <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="o">*</span><span class="n">pcls</span> <span class="o">=</span> <span class="n">cls</span><span class="p">;</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The first thing that happens in <code>_load_class</code> is to handle the case that the class has not yet loaded the library which happens the first time the class loaded (status == <code>CLASS_UNKNOWN</code>), or each time after that until any of its dependencies are missing (status == <code>CLASS_MISSING</code>).</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">ClassHandler</span><span class="o">::</span><span class="n">_load_class</span><span class="p">(</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">==</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_UNKNOWN</span> <span class="o">||</span>
+      <span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">==</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_MISSING</span><span class="p">)</span> <span class="p">{</span>
+</code></pre></div>
+<p>The path to the library is constructed based on a naming convention (<code>libcls_&lt;&lt;class-name&gt;&gt;.so</code>) and then the OSD attempts to load the library using <code>dlopen()</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">char</span> <span class="n">fname</span><span class="p">[</span><span class="n">PATH_MAX</span><span class="p">];</span>
+
+    <span class="c1">// build the path to the shared library based on the class name</span>
+    <span class="n">snprintf</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">fname</span><span class="p">),</span> <span class="s">&quot;%s/&quot;</span> <span class="n">CLS_PREFIX</span> <span class="s">&quot;%s&quot;</span> <span class="n">CLS_SUFFIX</span><span class="p">,</span>
+         <span class="n">cct</span><span class="o">-&gt;</span><span class="n">_conf</span><span class="o">-&gt;</span><span class="n">osd_class_dir</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span>
+         <span class="n">cls</span><span class="o">-&gt;</span><span class="n">name</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+
+    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span> <span class="o">=</span> <span class="n">dlopen</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="n">RTLD_NOW</span><span class="p">);</span>
+</code></pre></div>
+<p>The <code>dlopen()</code> function will return a non-<code>NULL</code> value on success meaning that a native object class was loaded which satisfies our goal of having native object classes take precedence. Here we consider the error case. First we <code>stat</code> the path as it may be the case that the file exists and cannot be loaded for a variety of reasons:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">)</span> <span class="p">{</span>
+      <span class="k">struct</span> <span class="n">stat</span> <span class="n">st</span><span class="p">;</span>
+      <span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="o">::</span><span class="n">stat</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">st</span><span class="p">);</span>
+</code></pre></div>
+<p>In the case that <code>stat</code> cannot find the file we look for a Lua script with the same object class name. All other errors are handled normally:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">if</span> <span class="p">(</span><span class="n">r</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">errno</span><span class="p">;</span>
+        <span class="n">dout</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">__func__</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; could not stat class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">fname</span>
+                <span class="o">&lt;&lt;</span> <span class="s">&quot;: &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cpp_strerror</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">r</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+          <span class="n">r</span> <span class="o">=</span> <span class="n">_load_lua_class</span><span class="p">(</span><span class="n">cls</span><span class="p">);</span>
+      <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+        <span class="n">dout</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;_load_class could not open class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">fname</span>
+                <span class="o">&lt;&lt;</span> <span class="s">&quot; (dlopen failed): &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dlerror</span><span class="p">()</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+        <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EIO</span><span class="p">;</span>
+      <span class="p">}</span>
+</code></pre></div>
+<p>If there was an error resolving the class name to a native module or a Lua script, then we change the state of the class to <code>CLASS_MISSING</code> and return an error.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="c1">// dlopen error may be cleared if Lua class found</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">=</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_MISSING</span><span class="p">;</span>
+        <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Let&#39;s now look at what happens in <code>_load_lua_class</code> before continuing to describe this method. The first thing that we do is use a naming convention to construct a path name for a target Lua script. Notice that here we use the <code>osd_lua_class_dir</code> configuration option that we described previously in this post. Normally it points at the directory <code>/usr/share/ceph/rados-classes/</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">ClassHandler</span><span class="o">::</span><span class="n">_load_lua_class</span><span class="p">(</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">char</span> <span class="n">fname</span><span class="p">[</span><span class="n">PATH_MAX</span><span class="p">];</span>
+
+  <span class="n">snprintf</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">fname</span><span class="p">),</span>
+      <span class="s">&quot;%s/&quot;</span> <span class="n">CLS_LUA_PREFIX</span> <span class="s">&quot;%s&quot;</span> <span class="n">CLS_LUA_SUFFIX</span><span class="p">,</span>
+      <span class="n">cct</span><span class="o">-&gt;</span><span class="n">_conf</span><span class="o">-&gt;</span><span class="n">osd_lua_class_dir</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span>
+      <span class="n">cls</span><span class="o">-&gt;</span><span class="n">name</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+</code></pre></div>
+<p>Next we see if the file exists using <code>stat</code> system call and bail if there is an error:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">struct</span> <span class="n">stat</span> <span class="n">st</span><span class="p">;</span>
+  <span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="o">::</span><span class="n">stat</span><span class="p">(</span><span class="n">fname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">st</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">r</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">errno</span><span class="p">;</span>
+    <span class="n">dout</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">__func__</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; could not stat class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">fname</span>
+      <span class="o">&lt;&lt;</span> <span class="s">&quot;: &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cpp_strerror</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+    <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>The file exists, but lets add a sanity check before moving on:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">if</span> <span class="p">(</span><span class="n">st</span><span class="p">.</span><span class="n">st_size</span> <span class="o">&gt;</span> <span class="n">CLS_LUA_MAX_SIZE</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">dout</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">__func__</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; lua script too big &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">fname</span>
+      <span class="o">&lt;&lt;</span> <span class="s">&quot;: &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">st</span><span class="p">.</span><span class="n">st_size</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; bytes&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+    <span class="k">return</span> <span class="o">-</span><span class="n">EIO</span><span class="p">;</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>Finally we read the script into a string that is stored in the C++ object representing the class:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_script</span><span class="p">.</span><span class="n">reserve</span><span class="p">(</span><span class="n">st</span><span class="p">.</span><span class="n">st_size</span><span class="p">);</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">ifstream</span> <span class="n">ifs</span><span class="p">(</span><span class="n">fname</span><span class="p">);</span>
+  <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_script</span><span class="p">.</span><span class="n">assign</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">istreambuf_iterator</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">&gt;</span><span class="p">(</span><span class="n">ifs</span><span class="p">),</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">istreambuf_iterator</span><span class="o">&lt;</span><span class="kt">char</span><span class="o">&gt;</span><span class="p">());</span>
+</code></pre></div>
+<p>To finish up we manually add a dependency on the <code>lua</code> class which is needed to run the script we just read, and mark a special flag on the object class that indicates that this class is defined by a Lua script:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="cm">/*</span>
+<span class="cm">   * Mark &#39;lua&#39; as a class dependency.</span>
+<span class="cm">   */</span>
+  <span class="n">ClassData</span> <span class="o">*</span><span class="n">cls_dep</span> <span class="o">=</span> <span class="n">_get_class</span><span class="p">(</span><span class="s">&quot;lua&quot;</span><span class="p">);</span>
+  <span class="n">cls</span><span class="o">-&gt;</span><span class="n">dependencies</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">cls_dep</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cls_dep</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">!=</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_OPEN</span><span class="p">)</span>
+    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">missing_dependencies</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">cls_dep</span><span class="p">);</span>
+
+  <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_handler</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>This brings up an important implementation note. We use the object class machinery in the OSD to explicitly represent object classes that are backed by a Lua script. However, the existing representation of object classes assumes the class is backed by a dynamically loaded native shared library. In contrast, classes defined by a Lua script act as a proxy, forwarding their methods onto the native <code>lua</code> class that can evaluate Lua scripts that define object classes.</p>
+
+<p>Now back to the <code>_load_class</code> method. At this point we have a new object class and have either loaded it from native shared library or a Lua script. Before we can use the class we need to make sure any dependencies are met. For native libraries a symbol within the shared library is resolved and interpreted as array of strings defining the set of dependencies. However, for classes backed by a Lua script there is no shared library to interact with. Thus, we need to be careful to ensure that existing code does not assume that a class is backed by a shared library. To do this we simply check that <code>cls-&gt;handle</code> is non-<code>NULL</code> (we omit the rest of the process of saving the set of dependencies).</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">)</span> <span class="p">{</span>
+      <span class="kt">cls_deps_t</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="n">cls_deps</span><span class="p">)();</span>
+      <span class="n">cls_deps</span> <span class="o">=</span> <span class="p">(</span><span class="kt">cls_deps_t</span> <span class="o">*</span><span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">dlsym</span><span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">,</span> <span class="s">&quot;class_deps&quot;</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">cls_deps</span><span class="p">)</span> <span class="p">{</span>
+        <span class="kt">cls_deps_t</span> <span class="o">*</span><span class="n">deps</span> <span class="o">=</span> <span class="n">cls_deps</span><span class="p">();</span>
+        <span class="k">while</span> <span class="p">(</span><span class="n">deps</span><span class="p">)</span> <span class="p">{</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>The next step is to actually resolve the dependencies. The immediately proceeding code snippet populates the set of dependencies for shared libraries, but as we saw in <code>_load_lua_class</code> the <code>lua</code> dependency is manually attached to classes backed by Lua scripts. Resolving dependencies is a recursive call to <code>_load_class</code> and is omitted here. It is the same for all types of classes.</p>
+
+<p>Next we configure the class as a proxy. First we grab a reference to the <code>lua</code> object class. The assertion is OK because we should have already resolved the dependency:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_handler</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">lua_cls</span> <span class="o">=</span> <span class="n">_get_class</span><span class="p">(</span><span class="s">&quot;lua&quot;</span><span class="p">);</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">lua_cls</span> <span class="o">&amp;&amp;</span> <span class="n">lua_cls</span><span class="o">-&gt;</span><span class="n">name</span> <span class="o">==</span> <span class="s">&quot;lua&quot;</span> <span class="o">&amp;&amp;</span>
+        <span class="n">lua_cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">==</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_OPEN</span><span class="p">);</span>
+</code></pre></div>
+<p>Next we grab a reference to the <code>eval_bufferlist</code> method on the <code>lua</code> class. Above we demonstrated how to encode operations via the <code>eval_json</code> method, and this is similar but uses internal Ceph encoding protocol.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassMethod</span> <span class="o">*</span><span class="n">lua_method</span><span class="p">;</span>
+    <span class="n">lua_method</span> <span class="o">=</span> <span class="n">lua_cls</span><span class="o">-&gt;</span><span class="n">_get_method</span><span class="p">(</span><span class="s">&quot;eval_bufferlist&quot;</span><span class="p">);</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">lua_method</span><span class="p">);</span>
+</code></pre></div>
+<p>Finally we setup a fixed method that will forward invocations to the <code>lua</code> class. Note that the method flags are set to <code>read + write</code>. This is a conservative view necessary because Lua scripts don&#39;t currently have a callback method for exposing these flags. Finally, note that the <code>cxx_func</code> of this proxy method actually points to the method in the <code>lua</code> class.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_method_proxy</span><span class="p">.</span><span class="n">cxx_func</span> <span class="o">=</span> <span class="n">lua_method</span><span class="o">-&gt;</span><span class="n">cxx_func</span><span class="p">;</span>
+    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_method_proxy</span><span class="p">.</span><span class="n">name</span> <span class="o">=</span> <span class="s">&quot;lua_method_proxy&quot;</span><span class="p">;</span>
+    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_method_proxy</span><span class="p">.</span><span class="n">flags</span> <span class="o">=</span> <span class="n">CLS_METHOD_RD</span> <span class="o">|</span> <span class="n">CLS_METHOD_WR</span><span class="p">;</span>
+    <span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_method_proxy</span><span class="p">.</span><span class="n">cls</span> <span class="o">=</span> <span class="n">cls</span><span class="p">;</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>At this point I&#39;ll briefly explain this method structure. The main structure representing an object class is <code>ClassHandler::ClassData</code> which contains the structure <code>map&lt;string, ClassMethod&gt; methods_map;</code> that maps the name of a method to a <code>ClassHandler::ClassMethod</code> structure. The <code>ClassHandler::ClassMethod</code> structure stores the method flags and a corresponding function pointer.</p>
+
+<p>When a class is created that is backed by a Lua script it is configured such that a fixed method exists (<code>ClassMethod lua_method_proxy;</code>), and we modify the method resolution routine to always return the proxy method for Lua classes:</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/osd/ClassHandler.cc b/src/osd/ClassHandler.cc</span>
+<span class="gh">index 5616307..e60783b 100644</span>
+<span class="gd">--- a/src/osd/ClassHandler.cc</span>
+<span class="gi">+++ b/src/osd/ClassHandler.cc</span>
+<span class="gu">@@ -296,6 +296,8 @@ ClassHandler::ClassFilter *ClassHandler::ClassData::register_cxx_filter(</span>
+
+ ClassHandler::ClassMethod *ClassHandler::ClassData::_get_method(const char *mname)
+ {
+<span class="gi">+  if (lua_handler)</span>
+<span class="gi">+    return &amp;lua_method_proxy;</span>
+   map&lt;string, ClassHandler::ClassMethod&gt;::iterator iter = methods_map.find(mname);
+   if (iter == methods_map.end())
+     return NULL;
+</code></pre></div>
+<p>The final operations in <code>_load_class</code> are to perform initialization on the class and activate the class by setting its status to <code>CLASS_OPEN</code>. Initialization is skipped for Lua classes:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// initialize (non-Lua classes)</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">)</span> <span class="p">{</span>
+    <span class="kt">void</span> <span class="p">(</span><span class="o">*</span><span class="n">cls_init</span><span class="p">)()</span> <span class="o">=</span> <span class="p">(</span><span class="kt">void</span> <span class="p">(</span><span class="o">*</span><span class="p">)())</span><span class="n">dlsym</span><span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">,</span> <span class="s">&quot;__cls_init&quot;</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">cls_init</span><span class="p">)</span> <span class="p">{</span>
+      <span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">=</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_INITIALIZING</span><span class="p">;</span>
+      <span class="n">cls_init</span><span class="p">();</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+
+  <span class="n">dout</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;_load_class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">name</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; success&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+  <span class="n">cls</span><span class="o">-&gt;</span><span class="n">status</span> <span class="o">=</span> <span class="n">ClassData</span><span class="o">::</span><span class="n">CLASS_OPEN</span><span class="p">;</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h3>Forward Method Calls</h3>
+
+<p>Recall that the OSD performs a pre-processing step on <code>IoCtx::exec</code> operations that verify that the target object class exists. In addition to this step per-method flags are extracted that assist in the remaining processing of the operation. Once a reference to the target class has been obtained the OSD grabs the flags:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">flags</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method_flags</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+  <span class="k">else</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">flags</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+<span class="n">is_read</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_RD</span><span class="p">;</span>
+<span class="n">is_write</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_WR</span><span class="p">;</span>
+</code></pre></div>
+<p>Taking into account the description of how Lua classes are handled, we know that the class isn&#39;t backed by a shared library. This call thus eventually resolves to the static method we defined that has its flags hard-coded (the <code>_get_method</code> call was shown above in which a Lua class simply returns a fixed proxy method):</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span><span class="o">::</span><span class="n">get_method_flags</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">mname</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">Mutex</span><span class="o">::</span><span class="n">Locker</span> <span class="n">l</span><span class="p">(</span><span class="n">handler</span><span class="o">-&gt;</span><span class="n">mutex</span><span class="p">);</span>
+  <span class="n">ClassMethod</span> <span class="o">*</span><span class="n">method</span> <span class="o">=</span> <span class="n">_get_method</span><span class="p">(</span><span class="n">mname</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span>
+    <span class="k">return</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">method</span><span class="o">-&gt;</span><span class="n">flags</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The next stop in the OSD that we are interested in is when the actual operation is invoked. This happens in <code>ReplicatedPG::do_osd_ops</code>. First we grab a reference to the target class by name:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">CassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">;</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">osd</span><span class="o">-&gt;</span><span class="n">class_handler</span><span class="o">-&gt;</span><span class="n">open_class</span><span class="p">(</span><span class="n">cname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cls</span><span class="p">);</span>
+<span class="n">assert</span><span class="p">(</span><span class="n">result</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span>   <span class="c1">// init_op_flags() already verified this works.</span>
+</code></pre></div>
+<p>Then the same for the target method:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassMethod</span> <span class="o">*</span><span class="n">method</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">dout</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;call method &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;.&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">mname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; does not exist&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+  <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+  <span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Finally the method is invoked. Note that the method name (<code>mname</code>) is passed to the method. Prior to the changes described in this post that parameter was not necessary because the method structure contained a direct function pointer to execute. However, when invoking a method on a Lua class the method doesn&#39;t actually exist. Instead, we pass the target method name to the proxy method which forwards the request to the <code>lua</code> class.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">result</span> <span class="o">=</span> <span class="n">method</span><span class="o">-&gt;</span><span class="n">exec</span><span class="p">((</span><span class="kt">cls_method_context_t</span><span class="p">)</span><span class="o">&amp;</span><span class="n">ctx</span><span class="p">,</span> <span class="n">indata</span><span class="p">,</span> <span class="n">outdata</span><span class="p">,</span> <span class="n">mname</span><span class="p">);</span>
+</code></pre></div>
+<h3>Patching Method Execution</h3>
+
+<p>What&#39;s left in processing the request is simply preparing the parameters and forwarding the call to the <code>lua</code> class. Recall that we are using <code>eval_bufferlist</code> which expects the parameter order to be (1) Lua script, (2) method name, and (3) the original input data:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassMethod</span><span class="o">::</span><span class="n">exec</span><span class="p">(</span><span class="kt">cls_method_context_t</span> <span class="n">ctx</span><span class="p">,</span>
+    <span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">indata</span><span class="p">,</span> <span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">outdata</span><span class="p">,</span> <span class="k">const</span> <span class="n">string</span><span class="o">&amp;</span> <span class="n">mname</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_handler</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">bufferlist</span> <span class="n">tmp_indata</span><span class="p">;</span>
+    <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">cls</span><span class="o">-&gt;</span><span class="n">lua_script</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+    <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">mname</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+    <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">indata</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+    <span class="n">indata</span> <span class="o">=</span> <span class="n">tmp_indata</span><span class="p">;</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">cxx_func</span><span class="p">);</span> <span class="c1">// we don&#39;t setup a C version</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>The remainder of the <code>exec</code> is left unchanged because the proxy method was already setup with its <code>cxx_func</code> to point at the <code>eval_bufferlist</code> method of the <code>lua</code> class:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="kt">int</span> <span class="n">ret</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">cxx_func</span><span class="p">)</span> <span class="p">{</span>
+    <span class="c1">// C++ call version</span>
+    <span class="n">ret</span> <span class="o">=</span> <span class="n">cxx_func</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">indata</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">outdata</span><span class="p">);</span>
+  <span class="p">}</span> <span class="k">else</span> <span class="p">{</span>
+    <span class="c1">// C version</span>
+    <span class="kt">char</span> <span class="o">*</span><span class="n">out</span> <span class="o">=</span> <span class="nb">NULL</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">olen</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+    <span class="n">ret</span> <span class="o">=</span> <span class="n">func</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">indata</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span> <span class="n">indata</span><span class="p">.</span><span class="n">length</span><span class="p">(),</span> <span class="o">&amp;</span><span class="n">out</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">olen</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">out</span><span class="p">)</span> <span class="p">{</span>
+      <span class="c1">// assume *out was allocated via cls_alloc (which calls malloc!)</span>
+      <span class="n">buffer</span><span class="o">::</span><span class="n">ptr</span> <span class="n">bp</span> <span class="o">=</span> <span class="n">buffer</span><span class="o">::</span><span class="n">claim_malloc</span><span class="p">(</span><span class="n">olen</span><span class="p">,</span> <span class="n">out</span><span class="p">);</span>
+      <span class="n">outdata</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">bp</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>And those are the only changes needed. The entire patch set is fairly small, and includes other important bits like fixing some assumptions on classes being backed by shared libraries.</p>
+
+<h1>Testing</h1>
+
+<p>We&#39;ll start with a test to make sure everything works as expected. Here is the Lua class we&#39;ll be using. The <code>say_hello</code> method returns the same result at the <code>hello</code> class that is written in C++, but we append <code>(from Lua)</code> to the output to distinguish between the two.</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>cat /usr/share/ceph/rados-classes/cls_hellolua.lua 
+<span class="k">function</span> say_hello<span class="o">(</span>input, output<span class="o">)</span>
+    output:append<span class="o">(</span><span class="s2">&quot;Hello, &quot;</span><span class="o">)</span>
+    <span class="k">if</span> <span class="c">#input &gt; 0 then</span>
+        output:append<span class="o">(</span>input:str<span class="o">())</span>
+    <span class="k">else</span>
+        output:append<span class="o">(</span><span class="s2">&quot;world&quot;</span><span class="o">)</span>
+    end
+    output:append<span class="o">(</span><span class="s2">&quot;! (from Lua)&quot;</span><span class="o">)</span>
+end
+
+cls.register<span class="o">(</span>say_hello<span class="o">)</span>
+</code></pre></div>
+<p>We&#39;ll test with the following Python snippet:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">ret</span><span class="p">,</span> <span class="n">out</span> <span class="o">=</span> <span class="n">ioctx</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">&#39;oid&#39;</span><span class="p">,</span> <span class="s">&#39;hellolua&#39;</span><span class="p">,</span> <span class="s">&#39;say_hello&#39;</span><span class="p">,</span> <span class="s">&quot;Ceph&quot;</span><span class="p">)</span>
+<span class="k">print</span> <span class="n">out</span>
+</code></pre></div>
+<p>When run we get the following output which is what we expected to get:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+Hello, Ceph! <span class="o">(</span>from Lua<span class="o">)</span>
+</code></pre></div>
+<p>Next we&#39;ll test that the scripts are re-loaded after each restart by modifying the script to append <code>-- Updated</code> to the message returned to the client:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+Hello, Ceph! <span class="o">(</span>from Lua<span class="o">)</span> -- Updated
+</code></pre></div>
+<p>That worked just fine. Now we can test that native libraries take precedence. To do this we&#39;ll rename <code>cls_hellolua.lua</code> to <code>cls_hello.lua</code> and then call the <code>say_hello</code> method on the <code>hello</code> class:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+Hello, Ceph!
+</code></pre></div>
+<p>And that is what we expected from the native <code>hello</code> class. Now we&#39;ll test the dependency mechanism. We&#39;ll rename <code>libcls_lua.so</code> to prevent it from being loaded. Then we&#39;ll try to run a Lua script class which should fail, and finally restore the naming of the <code>lua</code> library file and try again for success:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">mv /usr/lib/rados-classes/libcls_lua.so /usr/lib/rados-classes/libcls_dont_load.so 
+
+python test.py
+<span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+rados.Error: Ioctx.exec<span class="o">(</span>rbd<span class="o">)</span>: failed to <span class="nb">exec </span>hellolua:say_hello on oid: errno ENOTSUP
+
+<span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>cat out/osd.0.log <span class="p">|</span> grep lua
+2015-12-06 20:55:34.996635 7f75c61a3700  <span class="m">0</span> _load_class could not stat class ./usr/lib/rados-classes/libcls_lua.so: <span class="o">(</span>2<span class="o">)</span> No such file or directory
+</code></pre></div>
+<p>Now for the success case:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">mv /usr/lib/rados-classes/libcls_dont_load.so /usr/lib/rados-classes/libcls_lua.so
+
+<span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+Hello, Ceph! <span class="o">(</span>from Lua<span class="o">)</span>
+</code></pre></div>
+<p>Great, so everything is working as expected. In future posts we&#39;ll present
+more advanced techniques for managing dynamic storage interfaces.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

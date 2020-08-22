@@ -1,0 +1,705 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Dynamic RADOS Object Interfaces With Lua</title>
+  <meta name="description" content="In this post I’m going to demonstrate how to dynamically extend the interfaceof objects in RADOS using the Lua scripting language, and then build an examples...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2014/01/22/dynamic-rados-object-interfaces.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Dynamic RADOS Object Interfaces With Lua</h1>
+    <p class="post-meta">Jan 22, 2014
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <p>In this post I’m going to demonstrate how to dynamically extend the interface
+of objects in RADOS using the Lua scripting language, and then build an example
+service for image thumbnail generation and storage that performs remote image
+processing inside a target object storage device (OSD). We’re gonna have a lot
+of fun.</p>
+
+<p><strong><em>Note that this is a re-post of the article appearing at
+<a href="http://ceph.com/rados/dynamic-object-interfaces-with-lua/">http://ceph.com/rados/dynamic-object-interfaces-with-lua/</a>
+which was published on October 29, 2013.</em></strong></p>
+
+<h2>Rados Object Classes</h2>
+
+<p>One of the less publicized features of the RADOS object store is the ability to
+extend the object interface by writing C/C++ plugins that add new remote
+execution targets that may perform arbitrary operations on object data. The
+ability to add user-defined functionality to the OSD is a very powerful feature
+allowing applications to reduce network round-trips and data movement, exploit
+remote resources, and simplify otherwise complex interfaces by taking advantage
+of the transactional context within which remote operations execute. But that’s
+enough marketing—here is a very simple example that computes the MD5 hash of an
+object without transferring the object payload over the network.</p>
+
+<h3>Example: MD5 Hash of Object</h3>
+
+<p>The straightforward method for a client to compute the MD5 hash of an object is
+to first retrieve the entire object and then apply the MD5 hash function to the
+data locally. Using librados and the crypotpp library, this might look
+something like the following:</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><span class="n">bufferlist</span> <span class="n">data</span><span class="p">;</span>
+<span class="kt">size_t</span> <span class="n">size</span><span class="p">;</span>
+
+<span class="n">ioctx</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="s">&quot;my_obj&quot;</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">);</span>
+
+<span class="n">byte</span> <span class="n">digest</span><span class="p">[</span><span class="n">AES</span><span class="o">::</span><span class="n">BLOCKSIZE</span><span class="p">];</span>
+<span class="n">MD5</span><span class="p">().</span><span class="n">CalculateDigest</span><span class="p">(</span><span class="n">digest</span><span class="p">,</span> <span class="p">(</span><span class="n">byte</span><span class="o">*</span><span class="p">)</span><span class="n">data</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span> <span class="n">data</span><span class="p">.</span><span class="n">length</span><span class="p">());</span></code></pre></figure>
+
+<p>Here the client first reads the entire object over the network, and then
+computes the MD5 hash of the object data. However, transferring the entire
+object to the client can be avoided by introducing a custom object interface
+for computing the MD5 hash within the storage system. The following code
+snippet illustrates the basics of how an MD5 hash could be computed using the
+object class facility. Note that the following code would in practice be
+compiled into a shared library and loaded dynamically into a running OSD
+process, but we’ve omitted the deployment details to keep things simple (there
+are links at the end of this section to more information on getting started
+with object classes).</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><span class="kt">int</span> <span class="nf">compute_md5</span><span class="p">(</span><span class="kt">cls_method_context_t</span> <span class="n">hctx</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">in</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">out</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">size_t</span> <span class="n">size</span><span class="p">;</span>
+  <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">cls_cxx_stat</span><span class="p">(</span><span class="n">hctx</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">size</span><span class="p">,</span> <span class="nb">NULL</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+
+  <span class="n">bufferlist</span> <span class="n">data</span><span class="p">;</span>
+  <span class="n">ret</span> <span class="o">=</span> <span class="n">cls_cxx_read</span><span class="p">(</span><span class="n">hctx</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">data</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+
+  <span class="n">byte</span> <span class="n">digest</span><span class="p">[</span><span class="n">AES</span><span class="o">::</span><span class="n">BLOCKSIZE</span><span class="p">];</span>
+  <span class="n">MD5</span><span class="p">().</span><span class="n">CalculateDigest</span><span class="p">(</span><span class="n">digest</span><span class="p">,</span> <span class="p">(</span><span class="n">byte</span><span class="o">*</span><span class="p">)</span><span class="n">data</span><span class="p">.</span><span class="n">c_str</span><span class="p">(),</span> <span class="n">data</span><span class="p">.</span><span class="n">length</span><span class="p">());</span>
+
+  <span class="n">out</span><span class="o">-&gt;</span><span class="n">append</span><span class="p">(</span><span class="n">digest</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">digest</span><span class="p">));</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>Before explaining the function <code>compute_md5</code>, let’s see how a client would
+remotely invoke <code>compute_md5</code> to calculate the hash:</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><span class="n">bufferlist</span> <span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">;</span>
+<span class="n">ioctx</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="s">&quot;my_obj&quot;</span><span class="p">,</span> <span class="s">&quot;my_hash_class&quot;</span><span class="p">,</span> <span class="s">&quot;compute_md5&quot;</span><span class="p">,</span> <span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">);</span></code></pre></figure>
+
+<p>Here the client runs the librados exec method to invoke the <code>compute_md5</code>
+function remotely on the object named “my<em>obj”. Note that the “my</em>hash<em>class”
+is a name that identifies the plugin (not shown in this tutorial), and may
+contain many functions that can be invoked remotely. Now, through the power of
+networking, and lots of hand waving, a client can invoke the `compute</em>md5<code>
+function above which will run remotely on the OSD storing the target object
+(these are lots of gory details about how this actually happens that are beyond
+the scope of this document). When the remote method is executed, it performs a
+transaction that atomically reads the object payload and computes the MD5 hash,
+all within the OSD process, avoiding any network transfer of object data. At
+the end of the</code>compute_md5` function the digest is written into the out
+parameter that will be marshaled back to the client.</p>
+
+<p>Now that is some pretty magical stuff right there. But, there are situations
+where the overhead of compiling C/C++ into a shared library–potentially with
+multiple target architectures–is too heavy weight. It’d be nice if we could
+inject and alter object interfaces on-the-fly. To address this need, we’ve
+created a mechanism for defining new object classes using the Lua scripting
+language, which I’ll describe next.</p>
+
+<h3>Additional Resources: Object Class Development</h3>
+
+<p>While it was necessary to introduce the concept of object classes,
+unfortunately a full tutorial on the subject is not in the scope of this post.
+Located on github is a <a href="https://github.com/ceph/ceph/blob/master/src/cls/hello/cls_hello.cc">“Hello, World” example object class</a>
+containing extensive documentation. This
+resource is a good starting point, and if you have questions, please do not
+hesitate to ask questions on the Ceph mailing lists or IRC channels.</p>
+
+<h2>Dynamic Object Classes With Lua</h2>
+
+<p>In order to support dynamic generation of object interfaces, we’ve embedded the
+LuaJIT VM inside the OSD process. Why Lua, you may ask? The Lua language and
+its run-time are specifically designed as an embedded language, and when
+coupled with the LuaJIT virtual machine, near native performance can be
+achieved. Briefly, the current implementation expects a Lua script defining any
+number of functions to be sent to the OSD along with a client request that
+specifies which specific function in the script to execute. Now let’s dig into
+the details.</p>
+
+<p>A Lua object class is an arbitrary Lua script containing at least one exported
+function handler that a client may invoke remotely. By building up a collection
+of handlers, new and interesting interfaces to objects can be constructed and
+dynamically loaded into a running RADOS cluster. The basic structure of a Lua
+object class is shown in the following code snippet:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="c1">-- helper modules</span>
+<span class="c1">-- helper functions</span>
+<span class="c1">-- etc...</span>
+
+<span class="k">function</span> <span class="nf">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">handler1</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">handler2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+<span class="k">end</span>
+
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handler1</span><span class="p">)</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handler2</span><span class="p">)</span></code></pre></figure>
+
+<p>In the above Lua script any number of functions and modules can be used to
+support the behavior exported by the functions <code>handler1</code> and <code>handler2</code>. A client
+can remotely execute any registered function, provide an arbitrary input, and
+receive an arbitrary output.</p>
+
+<h3>Handler Registration</h3>
+
+<p>Object classes written in Lua may have many functions, only a subset of which
+are handlers available to be directly invoked by a client. In order to make a
+Lua function available, the function must be exported by registering it. This
+is done using the <code>cls.register</code> function. The following code snippet illustrates
+how this works.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">helper</span><span class="p">()</span>
+  <span class="c1">-- help out with stuff</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">thehandler</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">thehandler</span><span class="p">)</span></code></pre></figure>
+
+<p>In the above example <code>cls.register(thehandler)</code> exports the function thehandler,
+making it available for clients to call. A client that attempts to call the
+helper function (an unregistered function), will receive a return value of
+<code>-ENOTSUPP</code>.</p>
+
+<h3>Error Handling Semantics</h3>
+
+<p>In the previous section we presented an example object class method written in
+C++ that calculated the MD5 hash of an object. Returning to this example,
+notice that each operation on the object is carefully checked for failure, and
+an error code is returned if any operation fails. When a negative value is
+returned from an object class handler the current transaction will be aborted,
+and the return value is passed back to the client. When the handler has
+completed successfully a return value of zero will commit the transaction.
+While in C++ we must perform these checks explicitly, in Lua this common
+pattern for handling errors can be fully managed. Take as an example the
+following C++ object class handler:</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><span class="kt">int</span> <span class="nf">handle1</span><span class="p">(</span><span class="kt">cls_method_context_t</span> <span class="n">hctx</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">in</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">out</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">cls_cxx_create</span><span class="p">(</span><span class="n">hctx</span><span class="p">,</span> <span class="nb">true</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+  <span class="p">...</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>The handler <code>handle1</code> will return <code>-EEXIST</code> if the object already exists (or any
+other error encountered when running <code>cls_cxx_create</code>), and return zero if the
+handler complete successfully. The same functionality can be constructed in
+Lua, but when error handling fits this common pattern of aborting
+automatically, the Lua object class run-time will automagically select the
+correct return value. For instance in the following example, <code>handle2</code> and
+<code>handle3</code> have identical semantics to <code>handle1</code> defined above in C++.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">handle2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">cls</span><span class="p">.</span><span class="n">create</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">handle3</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">cls</span><span class="p">.</span><span class="n">create</span><span class="p">(</span><span class="kc">true</span><span class="p">);</span>
+<span class="k">end</span>
+
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handle2</span><span class="p">)</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handle3</span><span class="p">)</span></code></pre></figure>
+
+<p>Some operations return error codes that we may want to handle directly. For
+example, when retrieving a value from the object map, <code>-ENOENT</code> is used to
+indicate that the given key was not found. If the handler code can deal with
+this case (e.g. creating and initializing a new key), then it is simple enough
+to just return all other error codes. This exact scenario is shown in the
+following C++ handler, in which we abort on any error code that is not <code>-ENOENT</code>.</p>
+
+<figure class="highlight"><pre><code class="language-cpp" data-lang="cpp"><span class="kt">int</span> <span class="nf">handle</span><span class="p">(</span><span class="kt">cls_method_context_t</span> <span class="n">hctx</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">in</span><span class="p">,</span> <span class="n">bufferlist</span> <span class="o">*</span><span class="n">out</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">string</span> <span class="n">key</span><span class="p">;</span>
+  <span class="o">::</span><span class="n">decode</span><span class="p">(</span><span class="n">key</span><span class="p">,</span> <span class="o">*</span><span class="n">in</span><span class="p">);</span>
+  <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">cls_cxx_map_get_val</span><span class="p">(</span><span class="n">hctx</span><span class="p">,</span> <span class="n">key</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bl</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span> <span class="o">&amp;&amp;</span> <span class="n">ret</span> <span class="o">!=</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+    <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span> <span class="p">{</span>
+    <span class="cm">/* initialize new key */</span>
+  <span class="p">}</span>
+  <span class="p">...</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>The same handler can be constructed in Lua as follows:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">handle</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">key</span> <span class="o">=</span> <span class="n">input</span><span class="p">:</span><span class="n">str</span><span class="p">()</span>
+  <span class="n">ok</span><span class="p">,</span> <span class="n">ret_or_val</span> <span class="o">=</span> <span class="nb">pcall</span><span class="p">(</span><span class="n">cls</span><span class="p">.</span><span class="n">map_get_val</span><span class="p">,</span> <span class="n">key</span><span class="p">)</span>
+  <span class="k">if</span> <span class="ow">not</span> <span class="n">ok</span> <span class="k">then</span>
+    <span class="k">if</span> <span class="n">ret_or_val</span> <span class="o">~=</span> <span class="o">-</span><span class="n">cls</span><span class="p">.</span><span class="n">ENOENT</span> <span class="k">then</span>
+      <span class="k">return</span> <span class="n">ret_or_val</span>
+    <span class="k">else</span>
+      <span class="c1">-- initialize new key</span>
+    <span class="k">end</span>
+  <span class="k">end</span>
+  <span class="n">val</span> <span class="o">=</span> <span class="n">ret_or_val</span>
+  <span class="o">...</span>
+  <span class="k">return</span> <span class="mi">0</span>
+<span class="k">end</span></code></pre></figure>
+
+<p>The trick here is to call the <code>cls.map_get_val</code> in protected mode via the Lua
+pcall function, which prevents any errors from being automatically propagated
+to the caller, allowing our handler to examine the return value.</p>
+
+<h3>Logging</h3>
+
+<p>An object class can write into the OSD log (e.g. /var/log/ceph/osd-0.log) to
+record debugging information using the cls.log function. The function takes any
+number of arguments which are converted into strings and separated by spaces in
+the final output. If the first argument is numeric then it is interpreted as a
+log-level. If no log-level is specified a default log-level is used.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">hi&#39;</span><span class="p">)</span>         <span class="c1">-- will log &#39;hi&#39;</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="s1">&#39;</span><span class="s">ouch&#39;</span><span class="p">)</span>    <span class="c1">-- log &#39;ouch&#39; at log-level = 0</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">foo&#39;</span><span class="p">,</span> <span class="s1">&#39;</span><span class="s">bar&#39;</span><span class="p">)</span> <span class="c1">-- log &#39;foo bar&#39;</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>            <span class="c1">-- will log &#39;1&#39; at default log-level</span></code></pre></figure>
+
+<p>Logging is useful in debugging script execution and can also be used to provide
+more detailed error information.</p>
+
+<h3>Object Payload I/O</h3>
+
+<p>The payload data of an object can be read from and written to using the
+<code>cls.read</code> and <code>cls.write</code> functions. Each function takes an offset and length
+parameter.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">size</span><span class="p">,</span> <span class="n">mtime</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">stat</span><span class="p">()</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">size</span><span class="p">)</span>          <span class="c1">-- size bytes from offset 0</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">data</span><span class="p">:</span><span class="n">length</span><span class="p">(),</span> <span class="n">data</span><span class="p">)</span> <span class="c1">-- length of data at offset 0</span></code></pre></figure>
+
+<h3>Index Access</h3>
+
+<p>A key/value store supporting range queries (based on Google’s LevelDB) can be
+accessed using the <code>cls.map_set_val</code> and <code>cls.map_get_val</code> functions. A key can be
+any string and a value is a standard blob of any size.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">handler</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">cls</span><span class="p">.</span><span class="n">map_set_val</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">foo&quot;</span><span class="p">,</span> <span class="n">input</span><span class="p">)</span>
+  <span class="n">data</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">map_get_val</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">foo&quot;</span><span class="p">)</span>
+  <span class="nb">assert</span><span class="p">(</span><span class="n">data</span> <span class="o">==</span> <span class="n">input</span><span class="p">)</span>
+<span class="k">end</span></code></pre></figure>
+
+<h3>Additional Resources</h3>
+
+<p>The Lua object class facility is not yet in the mainline Ceph tree. The feature
+is located in the cls-lua branch, and can be checked out from github:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">git clone git://github.com/ceph/ceph.git cls-lua
+</code></pre></div>
+<p>The normal procedures for building and installing Ceph from source apply, and
+the only dependency is that LuaJIT development libraries be installed. These
+dependencies are available on Ubuntu. In addition, more functionality than is
+listed in this post has been implemented, and a set of unit tests are available
+in the source tree demonstrating the the full range of features.</p>
+
+<h2>Lua Client Libraries</h2>
+
+<p>Before we jump into the sample application, I’ll introduce two additional
+components that will make our life easier. The first is Lua bindings for
+librados, and the second is a Lua library that hides the details of serializing
+Lua scripts for execution within the OSD.</p>
+
+<h3>Lua-RADOS</h3>
+
+<p>Lua bindings for the librados client library are available on github at
+<a href="https://github.com/noahdesu/lua-rados/">https://github.com/noahdesu/lua-rados/</a>. Here we will provide a brief overview
+for context. Please consult the full documentation for additional information.
+Ok, let’s jump right in. The following code snippet shows how to connect to a
+RADOS cluster:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="kd">local</span> <span class="n">rados</span> <span class="o">=</span> <span class="nb">require</span> <span class="s2">&quot;</span><span class="s">rados&quot;</span>
+
+<span class="kd">local</span> <span class="n">cluster</span> <span class="o">=</span> <span class="n">rados</span><span class="p">.</span><span class="n">create</span><span class="p">()</span>
+<span class="n">cluster</span><span class="p">:</span><span class="n">conf_read_file</span><span class="p">()</span>
+<span class="n">cluster</span><span class="p">:</span><span class="n">connect</span><span class="p">()</span></code></pre></figure>
+
+<p>Next, open a client I/O context for a particular pool:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="kd">local</span> <span class="n">ioctx</span> <span class="o">=</span> <span class="n">cluster</span><span class="p">:</span><span class="n">open_ioctx</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">data&#39;</span><span class="p">)</span></code></pre></figure>
+
+<p>Now the Lua client can interact with objects, such as setting an extended
+attribute:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="kd">local</span> <span class="n">name</span> <span class="o">=</span> <span class="s1">&#39;</span><span class="s">xattr key&#39;</span>
+<span class="kd">local</span> <span class="n">data</span> <span class="o">=</span> <span class="s1">&#39;</span><span class="s">i am some important data&#39;</span>
+<span class="n">ioctx</span><span class="p">:</span><span class="n">setxattr</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">my_obj&#39;</span><span class="p">,</span> <span class="n">name</span><span class="p">,</span> <span class="n">data</span><span class="p">,</span> <span class="o">#</span><span class="n">data</span><span class="p">)</span></code></pre></figure>
+
+<p>Those are the basics of writing RADOS clients in Lua. Now, let’s run some
+remote scripts from a Lua client.</p>
+
+<h3>Cls-Lua Client</h3>
+
+<p>The protocol for sending a script to an OSD is fairly simple, but is easily
+wrapped up in a convenience library. The <a href="https://github.com/noahdesu/cls-lua-client/">cls-lua-client library</a> does just that, building on top of
+the <a href="https://github.com/noahdesu/lua-rados/">lua-rados library</a> described in the previous section. Assuming that we have
+connected to a RADOS cluster and constructed an I/O context object, a remote
+Lua script can be executed as in the following example. First, let’s create a
+Lua string containing the script we want to execute.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="kd">local</span> <span class="n">script</span> <span class="o">=</span> <span class="s">[[</span>
+<span class="s">function say_hello(input, output)</span>
+<span class="s">  output:append(&quot;Hello, &quot;)</span>
+<span class="s">  if #input == 0 then</span>
+<span class="s">    output:append(&quot;world&quot;)</span>
+<span class="s">  else</span>
+<span class="s">    output:append(input:str())</span>
+<span class="s">  end</span>
+<span class="s">  output:append(&quot;!&quot;)</span>
+<span class="s">end</span>
+<span class="s">cls.register(say_hello)</span>
+<span class="s">]]</span></code></pre></figure>
+
+<p>The script above will send to its output the string “Hello, world!” if the
+input is zero-length. Otherwise, it will reply with “Hello, <code>input</code>!”, where
+<code>input</code> is substituted with the input sent from the client. This can be
+remotely executed using the cls-lua-client library as follows:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="kd">local</span> <span class="n">ret</span><span class="p">,</span> <span class="n">outdata</span> <span class="o">=</span> <span class="n">clslua</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">oid&quot;</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">say_hello&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">outdata</span><span class="p">)</span>
+
+<span class="kd">local</span> <span class="n">ret</span><span class="p">,</span> <span class="n">outdata</span> <span class="o">=</span> <span class="n">clslua</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">oid&quot;</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">say_hello&quot;</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">John&quot;</span><span class="p">)</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">outdata</span><span class="p">)</span></code></pre></figure>
+
+<p>Executing this would produce the output:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">Hello, world!
+Hello, John!
+</code></pre></div>
+<p>Great, now we have all the pieces to start building a sample application!</p>
+
+<h2>Example Application: Image Thumbnail Service</h2>
+
+<p>As a driving example we will construct a service on top of RADOS that stores
+and generates image thumbnails. The service is very simple, and has the
+following properties.</p>
+
+<ul>
+<li>Writing an image into an object sets the “base” or “original” image data.</li>
+<li>A thumbnail computed from the base image can be generated remotely inside the OSD.</li>
+<li>The original image and any generated thumbnail can be retrieved.</li>
+</ul>
+
+<p>In the following examples I’ll demonstrate the core of the service. In
+practice these routines would be added to a larger project or executable, and
+of course made more robust against errors and different edge case scenarios.
+A <a href="https://github.com/noahdesu/cls-lua-client/blob/master/examples/imgserv.lua">fully functional
+example</a>
+of this can be found in the cls-lua-client project on github.</p>
+
+<h3>Storing an Image</h3>
+
+<p>To store an image in RADOS we first read it from a local file, and then write
+it to the object. In order to support storage and retrieval of different
+thumbnails, we record the location and size of an image blob in the object
+index under a key describing it. In this simple example writing an image sets
+its base image, so we store it under the key “original”.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">put</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="n">filename</span><span class="p">)</span>
+  <span class="c1">-- read in image blob from file</span>
+  <span class="kd">local</span> <span class="n">file</span> <span class="o">=</span> <span class="nb">io.open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">rb&quot;</span><span class="p">)</span>
+  <span class="kd">local</span> <span class="n">img</span> <span class="o">=</span> <span class="n">file</span><span class="p">:</span><span class="n">read</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">*all&quot;</span><span class="p">)</span>
+
+  <span class="c1">-- write the blob into the object</span>
+  <span class="kd">local</span> <span class="n">size</span><span class="p">,</span> <span class="n">offset</span> <span class="o">=</span> <span class="o">#</span><span class="n">img</span><span class="p">,</span> <span class="mi">0</span>
+  <span class="n">ioctx</span><span class="p">:</span><span class="n">write</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="n">img</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> <span class="n">offset</span><span class="p">)</span>
+
+  <span class="c1">-- record size/offset in the object index</span>
+  <span class="kd">local</span> <span class="n">loc_spec</span> <span class="o">=</span> <span class="n">size</span> <span class="o">..</span> <span class="s2">&quot;</span><span class="s">@&quot;</span> <span class="o">..</span> <span class="n">offset</span>
+  <span class="n">ioctx</span><span class="p">:</span><span class="n">omapset</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="p">{</span>
+    <span class="n">original</span> <span class="o">=</span> <span class="n">loc_spec</span><span class="p">,</span>
+  <span class="p">})</span>
+<span class="k">end</span></code></pre></figure>
+
+<h3>Reducing Round-trips</h3>
+
+<p>In the previous example two round-trips were required to 1) set the object data
+and 2) update the index. These can be done atomically in a single round-trip by
+using a co-designed interface, demonstrated in the following script:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">put_smart</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="n">filename</span><span class="p">)</span>
+  <span class="c1">-- define the script to execute remotely</span>
+  <span class="kd">local</span> <span class="n">script</span> <span class="o">=</span> <span class="s">[[</span>
+<span class="s">  function put(img)</span>
+<span class="s">    -- write the input blob</span>
+<span class="s">    local size, offset = #img, 0</span>
+<span class="s">    cls.write(offset, size, img)</span>
+
+<span class="s">    -- update the leveldb index</span>
+<span class="s">    local loc_spec_bl = bufferlist.new()</span>
+<span class="s">    local loc_spec = size .. &quot;@&quot; .. offset</span>
+<span class="s">    loc_spec_bl:append(spec)</span>
+<span class="s">    cls.map_set_val(&quot;original&quot;, loc_spec_bl)</span>
+<span class="s">  end</span>
+<span class="s">  cls.register(store)</span>
+<span class="s">  ]]</span>
+
+  <span class="c1">-- read the input image blob from the file</span>
+  <span class="kd">local</span> <span class="n">file</span> <span class="o">=</span> <span class="nb">io.open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">rb&quot;</span><span class="p">)</span>
+  <span class="kd">local</span> <span class="n">img</span> <span class="o">=</span> <span class="n">file</span><span class="p">:</span><span class="n">read</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">*all&quot;</span><span class="p">)</span>
+
+  <span class="c1">-- remotely execute script with image as input</span>
+  <span class="n">clslua</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="n">object</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">put&quot;</span><span class="p">,</span> <span class="n">img</span><span class="p">)</span>
+<span class="k">end</span></code></pre></figure>
+
+<p>The script reads the image from the file and sends the image as the input to a
+script which executes on the OSD, taking care of the write and index update at
+the same time. Neat!</p>
+
+<h3>Retrieving an Image</h3>
+
+<p>To read a particular version of an image we need to look-up the offset and
+length for the target image blob stored in the object index. In the following
+example the index look-up and object read are performed remotely, and the image
+is returned to the client if it exists. In the next section I’ll show how the
+spec string is stored, but for context it describes the specification for
+creating a thumbnail (e.g. 500×400 pixels).</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">get</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="n">filename</span><span class="p">,</span> <span class="n">spec</span><span class="p">)</span>
+  <span class="kd">local</span> <span class="n">script</span> <span class="o">=</span> <span class="s">[[</span>
+<span class="s">  function get(input, output)</span>
+<span class="s">    -- lookup the location of the image given the spec</span>
+<span class="s">    local loc_spec_bl = cls.map_get_val(input:str())</span>
+<span class="s">    local size, offset = string.match(loc_spec_bl:str(), &quot;(%d+)@(%d+)&quot;)</span>
+
+<span class="s">    -- read and return the image blob from the object</span>
+<span class="s">    out_bl = cls.read(offset, size)</span>
+<span class="s">    output:append(out_bl:str())</span>
+<span class="s">  end</span>
+<span class="s">  cls.register(get)</span>
+<span class="s">  ]]</span>
+
+  <span class="c1">-- execute script remotely</span>
+  <span class="n">ret</span><span class="p">,</span> <span class="n">img</span> <span class="o">=</span> <span class="n">clslua</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="n">object</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">get&quot;</span><span class="p">,</span> <span class="n">spec</span><span class="p">)</span>
+
+  <span class="c1">-- write image to output file</span>
+  <span class="kd">local</span> <span class="n">file</span> <span class="o">=</span> <span class="nb">io.open</span><span class="p">(</span><span class="n">filename</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">wb&quot;</span><span class="p">)</span>
+  <span class="n">file</span><span class="p">:</span><span class="n">write</span><span class="p">(</span><span class="n">img</span><span class="p">)</span>
+<span class="k">end</span></code></pre></figure>
+
+<p>The image returned from the script is then written to the output file.</p>
+
+<h3>Generating Thumbnails</h3>
+
+<p>Thumbnails are generated using Lua wrappers to <a href="http://www.imagemagick.org/">ImageMagick</a> available on github
+at <a href="https://github.com/leafo/magick">https://github.com/leafo/magick</a>. A thumbnail is generated using the
+<code>magick.thumb</code> function, passing in an image blob and a thumbnail specification
+string (e.g. 500×300 pixels). The script that runs remotely first reads the
+original image, computes the thumbnail, appends the thumbnail to the object
+payload, and then records the offset and size of the thumbnail in the object
+index under a key equal to the specification string.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">thumb</span><span class="p">(</span><span class="n">object</span><span class="p">,</span> <span class="n">spec_string</span><span class="p">)</span>
+  <span class="kd">local</span> <span class="n">script</span> <span class="o">=</span> <span class="s">[[</span>
+<span class="s">  (*local magick = require &quot;magick&quot;</span>
+
+<span class="s">  function get_orig_img()</span>
+<span class="s">    -- lookup the location of the original image</span>
+<span class="s">    local loc_spec_bl = cls.map_get_val(&quot;original&quot;)</span>
+<span class="s">    local size, offset = string.match(loc_spec_bl:str(), &quot;(%d+)@(%d+)&quot;)</span>
+
+<span class="s">    -- read image into memory</span>
+<span class="s">    return cls.read(offset, size)</span>
+<span class="s">  end</span>
+
+<span class="s">  function thumb(input, output)</span>
+<span class="s">    -- apply thumbnail spec to original image</span>
+<span class="s">    local spec_string = input:str()</span>
+<span class="s">    local blob = get_orig_img()</span>
+<span class="s">    local img = assert(magick.load_image_from_blob(blob:str()))</span>
+<span class="s">    img = magick.thumb(img, spec_string)</span>
+
+<span class="s">    -- append thumbnail to object</span>
+<span class="s">    local obj_size = cls.stat()</span>
+<span class="s">    local img_bl = bufferlist.new()</span>
+<span class="s">    img_bl:append(img)</span>
+<span class="s">    cls.write(obj_size, #img_bl, img_bl)</span>
+
+<span class="s">    -- save location in leveldb</span>
+<span class="s">    local loc_spec = #img_bl .. &quot;@&quot; .. obj_size</span>
+<span class="s">    local loc_spec_bl = bufferlist.new()</span>
+<span class="s">    loc_spec_bl:append(loc_spec)</span>
+<span class="s">    cls.map_set_val(spec_string, loc_spec_bl)</span>
+<span class="s">  end</span>
+
+<span class="s">  cls.register(thumb)*)</span>
+<span class="s">  ]]</span>
+
+  <span class="n">clslua</span><span class="p">.</span><span class="n">exec</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="n">object</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="s2">&quot;</span><span class="s">thumb&quot;</span><span class="p">,</span> <span class="n">spec_string</span><span class="p">)</span>
+<span class="k">end</span></code></pre></figure>
+
+<p>And that’s it folks… on-the-fly custom RADOS object interfaces! Want to
+contribute? We are continually improving the Lua bindings and the internal Lua
+object class API and are always looking for feedback. Thanks for stopping by!</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

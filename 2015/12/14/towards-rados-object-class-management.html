@@ -1,0 +1,590 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Toward Dynamic RADOS Object Class Management</title>
+  <meta name="description" content="">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/12/14/towards-rados-object-class-management.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Toward Dynamic RADOS Object Class Management</h1>
+    <p class="post-meta">Dec 14, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <p><strong>tl;dr</strong>: Object classes in RADOS are managed using a static versioning
+scheme, but this may be restrictive for dynamically defined interfaces. In this
+post we take describe a proof-of-concept implementation for dynamically
+managing object interfaces.</p>
+
+<p><a href="/2013/02/21/writing-cls-lua-handlers.html">The stable version of <code>cls_lua</code> that enables object classes to be written in
+Lua</a> is located in the <code>cls-lua</code> branch of the upstream Ceph repository
+(<a href="https://github.com/ceph/ceph/tree/cls-lua">https://github.com/ceph/ceph/tree/cls-lua</a>). The code described in this post is
+a work-in-progress and is maintained in a separate branch:
+<a href="https://github.com/noahdesu/ceph/tree/objclass-manager">https://github.com/noahdesu/ceph/tree/objclass-manager</a>.</p>
+
+<h1>Introduction</h1>
+
+<p>In a previous post I <a href="/2015/12/06/load-lua-rados-plugin-from-fs.html">described how dynamic Lua object classes can be managed in the file system</a>, extending the existing workflow for object class development to encompass object classes written in Lua. While this method is familiar to developers, it isn&#39;t the only way to manage dynamic interface. We envision a centralized system for interface management that handles persistence, distribution, and version management.</p>
+
+<p>There are many methods by which such a manager could be constructed. For instance, object classes could be managed in a custom object class that would provide persistence. However, since object class definitions must be distributed to all OSD processes in the cluster, additional functionality for retrieving these definitions and keeping them consistent across the cluster would need to be introduced. Another approach would be to make use of a data structure that is already distributed across OSD processes, such as the <code>OSDMap</code> or the structure that encodes pool information (<code>pg_pool_t</code>). In this post we&#39;ll explore a proof-of-concept interface manager service using <code>pg_pool_t</code> structure to manage object class definitions. In particular we will focus on the mechanics for distribution of classes. The semantics of versioning will be left for a future post.</p>
+
+<h1>Interface State Management</h1>
+
+<p>The <code>pg_pool_t</code> object contains a bunch of information about a RADOS pool. Information managed by this structure includes replication or erasure coding, cache mode, snapshots, etc... Our prototype begins with the addition of a string that will hold a Lua script. Note that future versions will have more complex management features that may require an entirely new set of managed structure, but in the interest of simplicity, a single Lua script will be the only new state introduced for the prototype.</p>
+
+<p>The <code>encode</code> and <code>decode</code> methods are used to serialize and deserialize the structure for saving to disk or transmitting across the network.</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/osd/osd_types.cc b/src/osd/osd_types.cc</span>
+<span class="gh">index de80857..32b25f8 100644</span>
+<span class="gd">--- a/src/osd/osd_types.cc</span>
+<span class="gi">+++ b/src/osd/osd_types.cc</span>
+<span class="gu">@@ -1429,7 +1429,7 @@ void pg_pool_t::encode(bufferlist&amp; bl, uint64_t features) const</span>
+     return;
+   }
+
+<span class="gd">-  ENCODE_START(24, 5, bl);</span>
+<span class="gi">+  ENCODE_START(25, 5, bl);</span>
+   ::encode(type, bl);
+   ::encode(size, bl);
+   ::encode(crush_ruleset, bl);
+<span class="gu">@@ -1478,12 +1478,13 @@ void pg_pool_t::encode(bufferlist&amp; bl, uint64_t features) const</span>
+   ::encode(hit_set_grade_decay_rate, bl);
+   ::encode(hit_set_search_last_n, bl);
+   ::encode(opts, bl);
+<span class="gi">+  ::encode(lua_script, bl);</span>
+   ENCODE_FINISH(bl);
+ }
+
+ void pg_pool_t::decode(bufferlist::iterator&amp; bl)
+ {
+<span class="gd">-  DECODE_START_LEGACY_COMPAT_LEN(24, 5, 5, bl);</span>
+<span class="gi">+  DECODE_START_LEGACY_COMPAT_LEN(25, 5, 5, bl);</span>
+   ::decode(type, bl);
+   ::decode(size, bl);
+   ::decode(crush_ruleset, bl);
+<span class="gu">@@ -1625,6 +1626,9 @@ void pg_pool_t::decode(bufferlist::iterator&amp; bl)</span>
+   if (struct_v &gt;= 24) {
+     ::decode(opts, bl);
+   }
+<span class="gi">+  if (struct_v &gt;= 25) {</span>
+<span class="gi">+    ::decode(lua_script, bl);</span>
+<span class="gi">+  }</span>
+   DECODE_FINISH(bl);
+   calc_pg_masks();
+   calc_grade_table();
+<span class="gh">diff --git a/src/osd/osd_types.h b/src/osd/osd_types.h</span>
+<span class="gh">index cb71218..be435dc 100644</span>
+<span class="gd">--- a/src/osd/osd_types.h</span>
+<span class="gi">+++ b/src/osd/osd_types.h</span>
+<span class="gu">@@ -1223,6 +1223,8 @@ struct pg_pool_t {</span>
+
+   pool_opts_t opts; ///&lt; options
+
+<span class="gi">+  string lua_script;</span>
+<span class="gi">+</span>
+ private:
+   vector&lt;uint32_t&gt; grade_table;
+</code></pre></div>
+<p>This structure is distributed across the cluster on a per-pool basis and provides pool metadata to OSD processes. The addition of the additional Lua script to the structure extends that distribution mechanism to our additional state. Next we&#39;ll see how to update that state from a client.</p>
+
+<h1>Installing an Interface</h1>
+
+<p>Now that the <code>pg_pool_t</code> has the new state that will hold the Lua script the state needs to be updated. Since the monitor coordinates updates to this structure through the OSD service, we&#39;ll piggyback on this infrastructure to make updates to the installed Lua script.</p>
+
+<p>Below we add a new monitor command, <code>ceph osd pool set-class &lt;pool&gt; &lt;class&gt; &lt;script&gt;</code>, which updates the <code>pg_pool_t</code> structure for the given pool using a round of Paxos, and ensures the update is propagated to each OSD in the cluster.</p>
+
+<p>First is some metadata describing the new command and its parameters:</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/mon/MonCommands.h b/src/mon/MonCommands.h</span>
+<span class="gh">index 8d09f91..2dff5ac 100644</span>
+<span class="gd">--- a/src/mon/MonCommands.h</span>
+<span class="gi">+++ b/src/mon/MonCommands.h</span>
+<span class="gu">@@ -676,6 +676,11 @@ COMMAND(&quot;osd pool get &quot; \</span>
+        &quot;name=pool,type=CephPoolname &quot; \
+        &quot;name=var,type=CephChoices,strings=size|min_size|crash_replay_interval|pg_num|pgp_num|crush_ruleset|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hi
+t_set_period|hit_set_count|hit_set_fpp|auid|target_max_objects|target_max_bytes|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cache_min_evict_age|erasure_code
+_profile|min_read_recency_for_promote|all|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priority|recove
+ry_op_priority&quot;, \
+        &quot;get pool parameter &lt;var&gt;&quot;, &quot;osd&quot;, &quot;r&quot;, &quot;cli,rest&quot;)
+<span class="gi">+COMMAND(&quot;osd pool set-class &quot; \</span>
+<span class="gi">+       &quot;name=pool,type=CephPoolname &quot; \</span>
+<span class="gi">+       &quot;name=class,type=CephString &quot; \</span>
+<span class="gi">+       &quot;name=script,type=CephString&quot;, \</span>
+<span class="gi">+       &quot;set pool object class &lt;class&gt; to &lt;script&gt;&quot;, &quot;osd&quot;, &quot;rw&quot;, &quot;cli,rest&quot;)</span>
+ COMMAND(&quot;osd pool set &quot; \
+        &quot;name=pool,type=CephPoolname &quot; \
+        &quot;name=var,type=CephChoices,strings=size|min_size|crash_replay_interval|pg_num|pgp_num|crush_ruleset|hashpspool|nodelete|nopgchange|nosizechange|write_fadvise_dontneed|noscrub|nodeep-scrub|hit_set_type|hi
+t_set_period|hit_set_count|hit_set_fpp|use_gmt_hitset|debug_fake_ec_pool|target_max_bytes|target_max_objects|cache_target_dirty_ratio|cache_target_dirty_high_ratio|cache_target_full_ratio|cache_min_flush_age|cac
+he_min_evict_age|auid|min_read_recency_for_promote|min_write_recency_for_promote|fast_read|hit_set_grade_decay_rate|hit_set_search_last_n|scrub_min_interval|scrub_max_interval|deep_scrub_interval|recovery_priori
+ty|recovery_op_priority &quot; \
+</code></pre></div>
+<p>Now for the implementation of the command. First thing we do is decode the three input parameters:</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gh">diff --git a/src/mon/OSDMonitor.cc b/src/mon/OSDMonitor.cc</span>
+<span class="gh">index ee5b51e..fce7567 100644</span>
+<span class="gd">--- a/src/mon/OSDMonitor.cc</span>
+<span class="gi">+++ b/src/mon/OSDMonitor.cc</span>
+<span class="gu">@@ -7310,6 +7310,45 @@ bool OSDMonitor::prepare_command_impl(MonOpRequestRef op,</span>
+     wait_for_finished_proposal(op, new Monitor::C_Command(mon, op, 0, ss.str(),
+                          get_last_committed() + 1));
+     return true;
+<span class="gi">+  } else if (prefix == &quot;osd pool set-class&quot;) {</span>
+<span class="gi">+</span>
+<span class="gi">+    string poolstr;</span>
+<span class="gi">+    cmd_getval(g_ceph_context, cmdmap, &quot;pool&quot;, poolstr);</span>
+<span class="gi">+    int64_t pool_id = osdmap.lookup_pg_pool_name(poolstr);</span>
+<span class="gi">+    if (pool_id &lt; 0) {</span>
+<span class="gi">+      ss &lt;&lt; &quot;unrecognized pool &#39;&quot; &lt;&lt; poolstr &lt;&lt; &quot;&#39;&quot;;</span>
+<span class="gi">+      err = -ENOENT;</span>
+<span class="gi">+      goto reply;</span>
+<span class="gi">+    }</span>
+<span class="gi">+</span>
+<span class="gi">+    string clsname;</span>
+<span class="gi">+    cmd_getval(g_ceph_context, cmdmap, &quot;class&quot;, clsname);</span>
+<span class="gi">+    if (clsname == &quot;&quot;) {</span>
+<span class="gi">+      ss &lt;&lt; &quot;invalid class name &#39;&quot; &lt;&lt; clsname &lt;&lt; &quot;&#39;&quot;;</span>
+<span class="gi">+      err = -EINVAL;</span>
+<span class="gi">+      goto reply;</span>
+<span class="gi">+    }</span>
+<span class="gi">+</span>
+<span class="gi">+    string script;</span>
+<span class="gi">+    cmd_getval(g_ceph_context, cmdmap, &quot;script&quot;, script);</span>
+<span class="gi">+    if (script == &quot;&quot;) {</span>
+<span class="gi">+      ss &lt;&lt; &quot;invalid script &lt;&lt;&lt; clipped &gt;&gt;&gt;&quot;;</span>
+<span class="gi">+      err = -EINVAL;</span>
+<span class="gi">+      goto reply;</span>
+<span class="gi">+    }</span>
+</code></pre></div>
+<p>Next we update the <code>pg_pool_t</code> structure and wait on a Paxos proposal with the update to complete:</p>
+<div class="highlight"><pre><code class="language-diff" data-lang="diff"><span class="gi">+    pg_pool_t *p = pending_inc.get_new_pool(pool_id,</span>
+<span class="gi">+        osdmap.get_pg_pool(pool_id));</span>
+<span class="gi">+</span>
+<span class="gi">+    p-&gt;lua_script = script;</span>
+<span class="gi">+</span>
+<span class="gi">+    ss &lt;&lt; &quot;set-class &quot; &lt;&lt; clsname &lt;&lt; &quot; (ignored) = &lt;&lt;&lt; clipped &gt;&gt;&gt; for pool &quot; &lt;&lt; poolstr;</span>
+<span class="gi">+</span>
+<span class="gi">+    rs = ss.str();</span>
+<span class="gi">+    wait_for_finished_proposal(op, new Monitor::C_Command(mon, op, 0, rs,</span>
+<span class="gi">+                         get_last_committed() + 1));</span>
+<span class="gi">+    return true;</span>
+<span class="gi">+</span>
+   } else if (prefix == &quot;osd pool set-quota&quot;) {
+     string poolstr;
+     cmd_getval(g_ceph_context, cmdmap, &quot;pool&quot;, poolstr);
+</code></pre></div>
+<p>And that is it for introducing the new state. The system will automatically distribute the updated state to across the cluster. We can give this a test from the Ceph CLI and provide a string containing a Lua script:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>./ceph osd pool <span class="nb">set </span>rbd lua_script <span class="s2">&quot;function test() end&quot;</span>
+<span class="nb">set </span>pool <span class="m">0</span> lua_script to <span class="o">&lt;&lt;&lt;</span> Lua script clipped &gt;&gt;&gt;
+</code></pre></div>
+<p>The monitor command infrastructure will echo the value being set, but we trim it because the size of the Lua script may be large. That CLI interface is useful, but it is also nice to have a programmatic interface. We can construct the monitor request using the RADOS <code>mon_command</code> API. The <code>mon_command</code> API takes a JSON formatted string that encodes the monitor command. We show below using Python:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="k">def</span> <span class="nf">set_lua_script</span><span class="p">(</span><span class="n">rados</span><span class="p">,</span> <span class="n">pool</span><span class="p">,</span> <span class="n">script</span><span class="p">,</span> <span class="n">timeout</span><span class="o">=</span><span class="mi">30</span><span class="p">):</span>
+    <span class="n">cmd</span> <span class="o">=</span> <span class="p">{</span>
+      <span class="s">&quot;prefix&quot;</span><span class="p">:</span> <span class="s">&quot;osd pool set&quot;</span><span class="p">,</span>
+      <span class="s">&quot;pool&quot;</span><span class="p">:</span>   <span class="n">pool</span><span class="p">,</span>
+      <span class="s">&quot;var&quot;</span><span class="p">:</span>    <span class="s">&quot;lua_script&quot;</span><span class="p">,</span>
+      <span class="s">&quot;val&quot;</span><span class="p">:</span>    <span class="n">script</span><span class="p">,</span>
+    <span class="p">}</span>
+    <span class="k">return</span> <span class="n">rados</span><span class="o">.</span><span class="n">mon_command</span><span class="p">(</span><span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">cmd</span><span class="p">),</span> <span class="s">&#39;&#39;</span><span class="p">,</span> <span class="n">timeout</span><span class="p">)</span>
+</code></pre></div>
+<p>We&#39;ve wrapped it up in a simple script called <code>ocm_set.py</code> (<code>ocm</code> is short for object class manager). So, we can now have programmatic access from Python via <code>rados.py</code>. The <code>mon_command</code> is also exposed through the C and C++ RADOS APIs, so all one would need to do is construct the required JSON and access is available through those languages as well. Here is an example using the <code>ocm_set.py</code> tool. The tool also accepts <code>-</code> as the input script parameter in which case the script is read from standard input.</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>./ocm_set.py rbd <span class="s2">&quot;function test() end&quot;</span>
+<span class="o">(</span>0, <span class="s1">&#39;&#39;</span>, u<span class="s1">&#39;set pool 0 lua_script to &lt;&lt;&lt; Lua script clipped &gt;&gt;&gt;&#39;</span><span class="o">)</span>
+</code></pre></div>
+<p>Adding the Lua script to the <code>pg_pool_t</code> is sufficient for distributing the script to the servers in the cluster, but at this point the string representing the Lua script isn&#39;t actually accessed. Next we need to wire it up to the Lua object class implementation <code>cls_lua</code> so we can use the <code>ioctx::exec</code> interface.</p>
+
+<h1>Access Installed Lua Script in OSD</h1>
+
+<p>When a client invokes the <code>exec</code> RADOS interface it generates a <code>CEPH_OSD_OP_CALL</code> operation to be executed within the OSD. The first stop along the execution path that is relevant for us is <code>OSD::init_op_flags</code> that does a fast examination on the operation to extract relevant information for the rest of execution of the operation.</p>
+
+<p>With respect to the <code>CEPH_OSD_OP_CALL</code> operation, the <code>OSD::init_op_flags</code> method does two things. First, it ensures that the shared library that implements the object class is loaded and checks to make sure that the method is available.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">;</span>
+<span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="n">class_handler</span><span class="o">-&gt;</span><span class="n">open_class</span><span class="p">(</span><span class="n">cname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cls</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">derr</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;class &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; open got &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cpp_strerror</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">r</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+  <span class="k">else</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EIO</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The second task is to mark the operation with read/write flags that are used by the OSD when executing the operation. Normal RADOS operations have these flags hard coded, but object class methods are loaded at runtime. The flags are normally extracted and saved before proceeding:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">flags</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method_flags</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+  <span class="k">else</span>
+    <span class="n">r</span> <span class="o">=</span> <span class="n">flags</span><span class="p">;</span>
+  <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="p">}</span>
+
+<span class="n">is_read</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_RD</span><span class="p">;</span>
+<span class="n">is_write</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_WR</span><span class="p">;</span>
+<span class="kt">bool</span> <span class="n">is_promote</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_PROMOTE</span><span class="p">;</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>In this proof-of-concept we will be reusing the <code>cls_lua</code> object class as the target class when invoking the <code>exec</code> RADOS method, so the default behavior above is correct---if the Lua object class isn&#39;t available an error is returned. However, there are issues to consider when ensuring that the target object class method exists.</p>
+
+<p>As an aside, the way the current <code>cls_lua</code> interface works is that there is exactly one method <code>lua.execute</code> which multiplexes user requests. That is, the actual method called and the script are packaged up as an input parameter. This works well, but it would also be nice to allow users to invoke the scripts without having to use a wrapper to handle input parameters, allowing something such as <code>lua.my_method_call</code> to be called with the vanilla RADOS API. This means that when <code>cls-&gt;get_method_flags(mname.c_str())</code> is called (above) that the method may not exist on the statically defined and loaded <code>cls_lua</code> object class, but the target method may still be defined within the Lua script that exists in <code>pg_pool_t</code>.</p>
+
+<p>Phew... OK the change is simple and I added a comment below to explain how it works.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">diff</span> <span class="o">--</span><span class="n">git</span> <span class="n">a</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">OSD</span><span class="p">.</span><span class="n">cc</span> <span class="n">b</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">OSD</span><span class="p">.</span><span class="n">cc</span>
+<span class="n">index</span> <span class="mi">7425</span><span class="n">cc7</span><span class="p">.</span><span class="mf">.0</span><span class="n">ed9bca</span> <span class="mi">100644</span>
+<span class="o">---</span> <span class="n">a</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">OSD</span><span class="p">.</span><span class="n">cc</span>
+<span class="o">+++</span> <span class="n">b</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">OSD</span><span class="p">.</span><span class="n">cc</span>
+<span class="err">@@</span> <span class="o">-</span><span class="mi">8740</span><span class="p">,</span><span class="mi">6</span> <span class="o">+</span><span class="mi">8740</span><span class="p">,</span><span class="mi">23</span> <span class="err">@@</span> <span class="kt">int</span> <span class="n">OSD</span><span class="o">::</span><span class="n">init_op_flags</span><span class="p">(</span><span class="n">OpRequestRef</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">)</span>
+    <span class="n">bp</span><span class="p">.</span><span class="n">copy</span><span class="p">(</span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">op</span><span class="p">.</span><span class="n">cls</span><span class="p">.</span><span class="n">class_len</span><span class="p">,</span> <span class="n">cname</span><span class="p">);</span>
+    <span class="n">bp</span><span class="p">.</span><span class="n">copy</span><span class="p">(</span><span class="n">iter</span><span class="o">-&gt;</span><span class="n">op</span><span class="p">.</span><span class="n">cls</span><span class="p">.</span><span class="n">method_len</span><span class="p">,</span> <span class="n">mname</span><span class="p">);</span>
+
+<span class="o">+</span>        <span class="cm">/*</span>
+<span class="cm">+         * Notes on handling Lua classes distributed via pg_pool_t:</span>
+<span class="cm">+         *</span>
+<span class="cm">+         *   Currently it is required that all scripts use the class name</span>
+<span class="cm">+         *   &quot;lua&quot; which means that `open_class` below always works and we</span>
+<span class="cm">+         *   virtualize on the method name. The ability to use Lua scripts</span>
+<span class="cm">+         *   loaded from the file system introduced the notion of Lua backed</span>
+<span class="cm">+         *   classes removing the requirement that &quot;lua&quot; class always be used.</span>
+<span class="cm">+         *</span>
+<span class="cm">+         *   The definition of Lua classes is held in pg_pool_t::lua_classes,</span>
+<span class="cm">+         *   but it isn&#39;t clear how to safely reach into that structure at</span>
+<span class="cm">+         *   this point in the code path.</span>
+<span class="cm">+         *</span>
+<span class="cm">+         *   TODO: find out what sort of synchronization issues arise when</span>
+<span class="cm">+         *   reaching into pg_pool_t at this point. If safe then extract the</span>
+<span class="cm">+         *   class name and script and patch into the ClassHandler.</span>
+<span class="cm">+         */</span>
+    <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">;</span>
+    <span class="kt">int</span> <span class="n">r</span> <span class="o">=</span> <span class="n">class_handler</span><span class="o">-&gt;</span><span class="n">open_class</span><span class="p">(</span><span class="n">cname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cls</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="p">{</span>
+<span class="err">@@</span> <span class="o">-</span><span class="mi">8751</span><span class="p">,</span><span class="mi">13</span> <span class="o">+</span><span class="mi">8768</span><span class="p">,</span><span class="mi">35</span> <span class="err">@@</span> <span class="kt">int</span> <span class="n">OSD</span><span class="o">::</span><span class="n">init_op_flags</span><span class="p">(</span><span class="n">OpRequestRef</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">)</span>
+      <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="kt">int</span> <span class="n">flags</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method_flags</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="o">-</span>   <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">-</span>     <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+<span class="o">-</span>       <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+<span class="o">-</span>     <span class="k">else</span>
+<span class="o">-</span>       <span class="n">r</span> <span class="o">=</span> <span class="n">flags</span><span class="p">;</span>
+<span class="o">-</span>     <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="o">-</span>   <span class="p">}</span>
+<span class="o">+</span>        <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">+</span>          <span class="cm">/*</span>
+<span class="cm">+           * If the method isn&#39;t found and the Lua class is being invoked</span>
+<span class="cm">+           * we&#39;ll attempt to perform late binding during execution of the Lua</span>
+<span class="cm">+           * script. This means that the static methods in `cls_lua` become</span>
+<span class="cm">+           * reserved:</span>
+<span class="cm">+           *</span>
+<span class="cm">+           *   - eval_msgpack</span>
+<span class="cm">+           *   - eval_json</span>
+<span class="cm">+           *   - eval_bufferlist</span>
+<span class="cm">+           *</span>
+<span class="cm">+           * TODO: there is currently not a method for extracting operation</span>
+<span class="cm">+           * flags from dynamically defined interfaces so we patch the flags</span>
+<span class="cm">+           * to be conservative and cover all our bases.</span>
+<span class="cm">+           *</span>
+<span class="cm">+           * TODO: since those methods are only referenced by a wrapper</span>
+<span class="cm">+           * library they could be slightly obfuscated to make a name</span>
+<span class="cm">+           * collision more unlikely.</span>
+<span class="cm">+           */</span>
+<span class="o">+</span>          <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span> <span class="o">&amp;&amp;</span> <span class="n">cname</span> <span class="o">==</span> <span class="s">&quot;lua&quot;</span><span class="p">)</span>
+<span class="o">+</span>            <span class="n">flags</span> <span class="o">=</span> <span class="n">CLS_METHOD_RD</span> <span class="o">|</span> <span class="n">CLS_METHOD_WR</span><span class="p">;</span>
+<span class="o">+</span>          <span class="k">else</span> <span class="p">{</span>
+<span class="o">+</span>            <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span>
+<span class="o">+</span>              <span class="n">r</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+<span class="o">+</span>            <span class="k">else</span>
+<span class="o">+</span>              <span class="n">r</span> <span class="o">=</span> <span class="n">flags</span><span class="p">;</span>
+<span class="o">+</span>            <span class="k">return</span> <span class="n">r</span><span class="p">;</span>
+<span class="o">+</span>          <span class="p">}</span>
+<span class="o">+</span>        <span class="p">}</span>
+    <span class="n">is_read</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_RD</span><span class="p">;</span>
+    <span class="n">is_write</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_WR</span><span class="p">;</span>
+         <span class="kt">bool</span> <span class="n">is_promote</span> <span class="o">=</span> <span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_PROMOTE</span><span class="p">;</span>
+</code></pre></div>
+<p>Note that it is possible to fully virtualize things so that Lua scripts don&#39;t have to use the <code>lua</code> object class as a target for <code>exec</code> calls. This is a relatively simple fix, but some more investigation is needed to look at what consistency guarantees are made accessing <code>pg_pool_t</code> in <code>OSD::init_op_flags</code>. Anyway...</p>
+
+<p>Now we can move onto the salient portion of the execution of the <code>CEPH_OSD_OP_CALL</code> operation performed in <code>ReplicatedPG::do_osd_ops</code>. The first thing that happens is to get a reference to the object class. Notice that it is a bug if the class isn&#39;t found---we just saw how that pre-processing of the operation performed this lookup.</p>
+
+<p><em>A possible race condition would be a dynamic class vanishing between the two processing stages we have just described. Future work.</em></p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassData</span> <span class="o">*</span><span class="n">cls</span><span class="p">;</span>
+<span class="n">result</span> <span class="o">=</span> <span class="n">osd</span><span class="o">-&gt;</span><span class="n">class_handler</span><span class="o">-&gt;</span><span class="n">open_class</span><span class="p">(</span><span class="n">cname</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">cls</span><span class="p">);</span>
+<span class="n">assert</span><span class="p">(</span><span class="n">result</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span>
+</code></pre></div>
+<p>The next task is to grab a reference to the actual method being invoked. Notice below that in the unmodified OSD if the method doesn&#39;t exist we return an error to the client.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassMethod</span> <span class="o">*</span><span class="n">method</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">dout</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;call method &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;.&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">mname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; does not exist&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+    <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+    <span class="k">break</span><span class="p">;</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>Previously when I showed how the operation flags were extracted we had to handle the case that the method didn&#39;t exist. We need to do the same thing here. Here is the patch that supports late binding the method. Notice that the input is rewritten to conform to the structured input that <code>eval_bufferlist</code> expects. Cool!</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">diff</span> <span class="o">--</span><span class="n">git</span> <span class="n">a</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">ReplicatedPG</span><span class="p">.</span><span class="n">cc</span> <span class="n">b</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">ReplicatedPG</span><span class="p">.</span><span class="n">cc</span>
+<span class="n">index</span> <span class="mi">27</span><span class="n">c7244</span><span class="p">.</span><span class="mf">.5703</span><span class="n">a8d</span> <span class="mi">100644</span>
+<span class="o">---</span> <span class="n">a</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">ReplicatedPG</span><span class="p">.</span><span class="n">cc</span>
+<span class="o">+++</span> <span class="n">b</span><span class="o">/</span><span class="n">src</span><span class="o">/</span><span class="n">osd</span><span class="o">/</span><span class="n">ReplicatedPG</span><span class="p">.</span><span class="n">cc</span>
+<span class="err">@@</span> <span class="o">-</span><span class="mi">4231</span><span class="p">,</span><span class="mi">11</span> <span class="o">+</span><span class="mi">4231</span><span class="p">,</span><span class="mi">29</span> <span class="err">@@</span> <span class="kt">int</span> <span class="n">ReplicatedPG</span><span class="o">::</span><span class="n">do_osd_ops</span><span class="p">(</span><span class="n">OpContext</span> <span class="o">*</span><span class="n">ctx</span><span class="p">,</span> <span class="n">vector</span><span class="o">&lt;</span><span class="n">OSDOp</span><span class="o">&gt;&amp;</span> <span class="n">ops</span><span class="p">)</span>
+    <span class="n">assert</span><span class="p">(</span><span class="n">result</span> <span class="o">==</span> <span class="mi">0</span><span class="p">);</span>   <span class="c1">// init_op_flags() already verified this works.</span>
+
+    <span class="n">ClassHandler</span><span class="o">::</span><span class="n">ClassMethod</span> <span class="o">*</span><span class="n">method</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method</span><span class="p">(</span><span class="n">mname</span><span class="p">.</span><span class="n">c_str</span><span class="p">());</span>
+<span class="o">-</span>   <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">-</span>     <span class="n">dout</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;call method &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;.&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">mname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; does not exist&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+<span class="o">-</span>     <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+<span class="o">-</span>     <span class="k">break</span><span class="p">;</span>
+<span class="o">-</span>   <span class="p">}</span>
+<span class="o">+</span>        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">+</span>          <span class="cm">/*</span>
+<span class="cm">+           * If the named method doesn&#39;t exist and the target object class is</span>
+<span class="cm">+           * `cls_lua` then we patch this call with the Lua script stored in</span>
+<span class="cm">+           * `pg_pool_t` and allow late binding of the referenced method with</span>
+<span class="cm">+           * the script.</span>
+<span class="cm">+           */</span>
+<span class="o">+</span>          <span class="k">if</span> <span class="p">(</span><span class="n">cname</span> <span class="o">==</span> <span class="s">&quot;lua&quot;</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">+</span>            <span class="n">method</span> <span class="o">=</span> <span class="n">cls</span><span class="o">-&gt;</span><span class="n">get_method</span><span class="p">(</span><span class="s">&quot;eval_bufferlist&quot;</span><span class="p">);</span>
+<span class="o">+</span>            <span class="k">if</span> <span class="p">(</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">+</span>              <span class="n">bufferlist</span> <span class="n">tmp_indata</span><span class="p">;</span>
+<span class="o">+</span>              <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">pool</span><span class="p">.</span><span class="n">info</span><span class="p">.</span><span class="n">lua_script</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+<span class="o">+</span>              <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">mname</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+<span class="o">+</span>              <span class="o">::</span><span class="n">encode</span><span class="p">(</span><span class="n">indata</span><span class="p">,</span> <span class="n">tmp_indata</span><span class="p">);</span>
+<span class="o">+</span>              <span class="n">indata</span> <span class="o">=</span> <span class="n">tmp_indata</span><span class="p">;</span>
+<span class="o">+</span>            <span class="p">}</span>
+<span class="o">+</span>          <span class="p">}</span>
+<span class="o">+</span>          <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">method</span><span class="p">)</span> <span class="p">{</span>
+<span class="o">+</span>            <span class="n">dout</span><span class="p">(</span><span class="mi">10</span><span class="p">)</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;call method &quot;</span> <span class="o">&lt;&lt;</span> <span class="n">cname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot;.&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">mname</span> <span class="o">&lt;&lt;</span> <span class="s">&quot; does not exist&quot;</span> <span class="o">&lt;&lt;</span> <span class="n">dendl</span><span class="p">;</span>
+<span class="o">+</span>            <span class="n">result</span> <span class="o">=</span> <span class="o">-</span><span class="n">EOPNOTSUPP</span><span class="p">;</span>
+<span class="o">+</span>            <span class="k">break</span><span class="p">;</span>
+<span class="o">+</span>          <span class="p">}</span>
+<span class="o">+</span>        <span class="p">}</span>
+
+    <span class="kt">int</span> <span class="n">flags</span> <span class="o">=</span> <span class="n">method</span><span class="o">-&gt;</span><span class="n">get_flags</span><span class="p">();</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">flags</span> <span class="o">&amp;</span> <span class="n">CLS_METHOD_WR</span><span class="p">)</span>
+</code></pre></div>
+<h1>Testing</h1>
+
+<p>First things first... let&#39;s make sure existing stuff isn&#39;t busted. We can test with the <code>cls_hello</code> demonstration object class:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">ret</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">ioctx</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">&#39;oid&#39;</span><span class="p">,</span> <span class="s">&#39;hello&#39;</span><span class="p">,</span> <span class="s">&#39;say_hello&#39;</span><span class="p">,</span> <span class="s">&#39;Bernie&#39;</span><span class="p">)</span>
+<span class="k">print</span> <span class="n">data</span><span class="p">[:</span><span class="n">ret</span><span class="p">]</span>
+</code></pre></div>
+<p>Which runs successfully:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+Hello, Bernie!
+</code></pre></div>
+<p>When we reference an object class that doesn&#39;t exist an error is correctly reported. Below we try to call a method on the <code>class-does-not-exist</code> class:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+rados.Error: Ioctx.exec<span class="o">(</span>rbd<span class="o">)</span>: failed to <span class="nb">exec </span>class-does-not-exist:say_hello on oid: errno ENOTSUP
+</code></pre></div>
+<p>Let&#39;s try to execute a Lua method using the built-in interface which requires the Lua script to be sent along with the request. Here we define a method in Lua that will return the input string in upper case:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">cmd</span> <span class="o">=</span> <span class="p">{</span>
+  <span class="s">&quot;script&quot;</span><span class="p">:</span> <span class="s">&quot;&quot;&quot;</span>
+<span class="s">      function upper(input, output)</span>
+<span class="s">        input_str = input:str()</span>
+<span class="s">        upper_str = string.upper(input_str)</span>
+<span class="s">        output:append(upper_str)</span>
+<span class="s">      end</span>
+<span class="s">      cls.register(upper)</span>
+<span class="s">  &quot;&quot;&quot;</span><span class="p">,</span>
+  <span class="s">&quot;handler&quot;</span><span class="p">:</span> <span class="s">&quot;upper&quot;</span><span class="p">,</span>
+  <span class="s">&quot;input&quot;</span><span class="p">:</span> <span class="s">&quot;this string was in lower case&quot;</span><span class="p">,</span>
+<span class="p">}</span>
+
+<span class="n">ret</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">ioctx</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">&#39;oid&#39;</span><span class="p">,</span> <span class="s">&#39;lua&#39;</span><span class="p">,</span> <span class="s">&#39;eval_json&#39;</span><span class="p">,</span> <span class="n">json</span><span class="o">.</span><span class="n">dumps</span><span class="p">(</span><span class="n">cmd</span><span class="p">))</span>
+<span class="k">print</span> <span class="n">data</span><span class="p">[:</span><span class="n">ret</span><span class="p">]</span>
+</code></pre></div>
+<p>And when run, we see the output that we expect:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+THIS STRING WAS IN LOWER CASE
+</code></pre></div>
+<p>So now on to the main attraction. What happens if we call a method on the <code>lua</code> class that doesn&#39;t exist? What we will do is call the <code>upper</code> method as if it was a first class method on the class. We get the correct response which can be interpreted as the method <code>upper</code> on the <code>lua</code> class does not exist as a static method, and was not found in the input script provided from <code>pg_pool_t</code> (if a script existed).</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+rados.Error: Ioctx.exec<span class="o">(</span>rbd<span class="o">)</span>: failed to <span class="nb">exec </span>lua:upper on oid: errno ENOTSUP
+</code></pre></div>
+<p>What we can do now is register the <code>upper</code> method with the cluster and try again. First we stash the method definition in a file called <code>upper.lua</code>:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>cat upper.lua 
+<span class="k">function</span> upper<span class="o">(</span>input, output<span class="o">)</span>
+    <span class="nv">input_str</span> <span class="o">=</span> input:str<span class="o">()</span>
+    <span class="nv">upper_str</span> <span class="o">=</span> string.upper<span class="o">(</span>input_str<span class="o">)</span>
+    output:append<span class="o">(</span>upper_str<span class="o">)</span>
+end
+cls.register<span class="o">(</span>upper<span class="o">)</span>
+</code></pre></div>
+<p>Next we use the <code>ocm_set.py</code> tool to register the Lua script:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>cat upper.lua <span class="p">|</span> python ocm_set.py rbd -
+<span class="o">(</span>0, <span class="s1">&#39;&#39;</span>, u<span class="s1">&#39;set pool 0 lua_script to &lt;&lt;&lt; Lua script clipped &gt;&gt;&gt;&#39;</span><span class="o">)</span>
+</code></pre></div>
+<p>Now we can modify our invocation of <code>exec</code> and pass the input string directly:</p>
+<div class="highlight"><pre><code class="language-python" data-lang="python"><span class="n">ret</span><span class="p">,</span> <span class="n">data</span> <span class="o">=</span> <span class="n">ioctx</span><span class="o">.</span><span class="n">execute</span><span class="p">(</span><span class="s">&#39;oid&#39;</span><span class="p">,</span> <span class="s">&#39;lua&#39;</span><span class="p">,</span> <span class="s">&#39;upper&#39;</span><span class="p">,</span> <span class="s">&quot;this string was in lower case&quot;</span><span class="p">)</span>
+<span class="k">print</span> <span class="n">data</span><span class="p">[:</span><span class="n">ret</span><span class="p">]</span>
+</code></pre></div>
+<p>Success:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py                                                                                                                                                                               
+THIS STRING WAS IN LOWER CASE
+</code></pre></div>
+<p>And we can then leave the invocation of <code>exec</code> the same and switch out the implementation transparently. Here is the updated script that we will register... it just returns the word <code>upper</code>:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>cat upper.lua 
+<span class="k">function</span> upper<span class="o">(</span>input, output<span class="o">)</span>
+    output:append<span class="o">(</span><span class="s2">&quot;upper&quot;</span><span class="o">)</span>
+end
+cls.register<span class="o">(</span>upper<span class="o">)</span>
+</code></pre></div>
+<p>If we repeat the test we see the expected output:</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash"><span class="o">[</span>nwatkins@kyoto src<span class="o">]</span><span class="nv">$ </span>python test.py
+upper
+</code></pre></div>
+<p>It works :)</p>
+
+<h1>What&#39;s Next</h1>
+
+<p>This is only the beginning. There are many things that need to be done to tackle some of the challenges introduced by this technique. From a production deployment stand point it will be beneficial to bake these new features into the object class infrastructure so that special cases are spread around the OSD code base. The second, more interesting thing, is to create a methodology for updating interfaces. The current proof-of-concept simply replaces whatever interface is currently installed. Facilities for migrating interfaces and performing data transformations to support migration are needed.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

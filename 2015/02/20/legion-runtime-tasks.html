@@ -1,0 +1,441 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #7: Tasks</title>
+  <meta name="description" content="About Legion Runtime Class">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/02/20/legion-runtime-tasks.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #7: Tasks</h1>
+    <p class="post-meta">Feb 20, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/RPTzRyQvtNI?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG" frameborder="0" allowfullscreen></iframe>
+
+<h2>Overview</h2>
+
+<p>In this class we&#39;ll take a look at how task scheduling works in Legion. Last time we looked at how operations are scheduled via <code>add_to_local_ready_queue</code> which is used to handle non-task operations that are ready to go through the mapping process. Recall that the round-robin dependency chains were used to throttle these operations.</p>
+
+<p>There is a different path that task operations take for scheduling because tasks have different semantics than non-task operations. This is primarily because tasks can be delayed or moved around between nodes. When tasks are ready to be mapped they go through <code>add_to_ready_queue</code>. The first thing is to mark the task as not scheduled to track its state:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">add_to_ready_queue</span><span class="p">(</span><span class="n">TaskOp</span> <span class="o">*</span><span class="n">task</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">prev_failure</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">task</span><span class="o">-&gt;</span><span class="n">schedule</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span> 
+  <span class="n">task</span><span class="o">-&gt;</span><span class="n">activate_outstanding_task</span><span class="p">();</span>
+
+  <span class="n">ContextID</span> <span class="n">ctx_id</span> <span class="o">=</span> <span class="n">task</span><span class="o">-&gt;</span><span class="n">get_parent</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">get_context_id</span><span class="p">();</span>
+  <span class="n">ContextState</span> <span class="o">&amp;</span><span class="n">state</span> <span class="o">=</span> <span class="n">context_states</span><span class="p">[</span><span class="n">ctx_id</span><span class="p">];</span>
+
+  <span class="n">AutoLock</span> <span class="nf">q_lock</span><span class="p">(</span><span class="n">queue_lock</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">prev_failure</span><span class="p">)</span>
+    <span class="n">ready_queues</span><span class="p">[</span><span class="n">task</span><span class="o">-&gt;</span><span class="n">map_id</span><span class="p">].</span><span class="n">push_front</span><span class="p">(</span><span class="n">task</span><span class="p">);</span>
+  <span class="k">else</span>
+    <span class="n">ready_queues</span><span class="p">[</span><span class="n">task</span><span class="o">-&gt;</span><span class="n">map_id</span><span class="p">].</span><span class="n">push_back</span><span class="p">(</span><span class="n">task</span><span class="p">);</span>
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">active</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span> <span class="o">==</span> <span class="mi">0</span><span class="p">))</span>
+    <span class="n">increment_active_contexts</span><span class="p">();</span>
+  <span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span><span class="o">++</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Before talking about the <code>ContextState</code>, notice that tasks are pushed onto a <code>ready_queue</code> structure:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// For each mapper, a list of tasks that are ready to map</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;</span> <span class="o">&gt;</span> <span class="n">ready_queues</span><span class="p">;</span>
+</code></pre></div>
+<p>The <code>ready_queue</code> tracks all of the tasks that are ready to map for a particular mapper. We want to give the mappers the ability to choose when and where tasks get mapped. Mappers may choose to defer mapping to achieve task stealing, or to migrate a task to a different node. The <code>ready_queue</code> is maintained by the runtime and is available for mappers as they make decisions. Notice that this is unlike the non-task operations that were launched immediately.</p>
+
+<p>One of the powerful things that Legion allows is for the runtime to run far ahead of the actual execution of the program to see into the future. However there is a trade-off between knowing the future, and the mapping failures that might come from mapping too far into the future. How far ahead the scheduling runs is controlled by the mapper via a few parameters. The mapper can set various parameters that controls this behavior via the mapper callback:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">virtual</span> <span class="kt">void</span> <span class="n">configure_context</span><span class="p">(</span><span class="n">Task</span> <span class="o">*</span><span class="n">task</span><span class="p">)</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+</code></pre></div>
+<p>For instance, <code>max_window_size</code> is used to control how many outstanding operations a tasks (context) should schedule. The <code>min_task_to_schedule</code> parameter says how many pending sub-tasks a context should schedule before the runtime stops asking the mapper to continue mapping. There are more advanced features for doing this such as utilizing the frame abstractions which lets mappers specify at a very high-level things such as looking ahead 2 or 3 time steps (or whatever applications-specific metric is configured).</p>
+
+<p>Now that that is out the way, let&#39;s look to see the mechanisms by which these parameters are used to control scheduling behavior. The last two lines of <code>add_to_ready_queue</code> check some values on the <code>ContextState</code> object that was obtained at the beginning of the method. The first thing we check is if the context is active. An active context means that there aren&#39;t any outstanding mapped tasks, and an owned task is a task that is ready to map but hasn&#39;t been mapped yet. That metric is effectively analogous to the size of the ready queue, but note that ready queues are tracked per mapper; the owned tasks value associated with the <code>ContextState</code> is tracked on a per-context basis.</p>
+
+<p>Basically the last line says that if we don&#39;t have enough outstanding mapped tasks, and we are about to have a new task then we want to enable the scheduler.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">if</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">active</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span> <span class="o">==</span> <span class="mi">0</span><span class="p">))</span>
+    <span class="n">increment_active_contexts</span><span class="p">();</span>
+  <span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span><span class="o">++</span><span class="p">;</span>
+</code></pre></div>
+<p>The <code>increment_active_contexts</code> increments the number of active contexts, and optionally enables the scheduler. The scheduler is enabled by this method if there were previously no active contexts and the scheduler wasn&#39;t already active:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">increment_active_contexts</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span> <span class="p">{</span>
+  <span class="k">if</span> <span class="p">((</span><span class="n">total_active_contexts</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">task_scheduler_enabled</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">task_scheduler_enabled</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="n">launch_task_scheduler</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="n">total_active_contexts</span><span class="o">++</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Launching the task scheduler involves scheduling a high-level runtime meta task with ID <code>HLR_SCHEDULER_ID</code>. When the scheduler is enabled this meta task is launched immediately.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">launch_task_scheduler</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">SchedulerArgs</span> <span class="n">sched_args</span><span class="p">;</span>
+  <span class="n">sched_args</span><span class="p">.</span><span class="n">hlr_id</span> <span class="o">=</span> <span class="n">HLR_SCHEDULER_ID</span><span class="p">;</span>
+  <span class="n">sched_args</span><span class="p">.</span><span class="n">proc</span> <span class="o">=</span> <span class="n">local_proc</span><span class="p">;</span>
+  <span class="n">utility_proc</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">HLR_TASK_ID</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">sched_args</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">sched_args</span><span class="p">));</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Recall that the high-level runtime task is that giant switch statement. Here is the relevant case that turns around and runs <code>process_schedule_request</code> with the relevant processor:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">case</span> <span class="nl">HLR_SCHEDULER_ID</span><span class="p">:</span>
+<span class="p">{</span>
+  <span class="k">const</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">SchedulerArgs</span> <span class="o">*</span><span class="n">sched_args</span> <span class="o">=</span> 
+      <span class="p">(</span><span class="k">const</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">SchedulerArgs</span><span class="o">*</span><span class="p">)</span><span class="n">args</span><span class="p">;</span>
+  <span class="n">Runtime</span><span class="o">::</span><span class="n">get_runtime</span><span class="p">(</span><span class="n">p</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">process_schedule_request</span><span class="p">(</span><span class="n">sched_args</span><span class="o">-&gt;</span><span class="n">proc</span><span class="p">);</span>
+  <span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>process_schedule_request</code> method runs <code>perform_scheduling</code> on the processor manager for the given processor:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">process_schedule_request</span><span class="p">(</span><span class="n">Processor</span> <span class="n">proc</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">ProcessorManager</span> <span class="o">*</span><span class="n">manager</span> <span class="o">=</span> <span class="n">proc_managers</span><span class="p">[</span><span class="n">proc</span><span class="p">];</span>
+  <span class="n">manager</span><span class="o">-&gt;</span><span class="n">perform_scheduling</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Finally we make it to <code>perform_scheduling</code> where mapping operations are run via <code>perform_mapping_operations</code>. The final step is to see figure out if there is more stuff to be done. If there are more active contexts then we re-launch the task scheduler, otherwise we disable the scheduler and pop back up the stack.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">perform_scheduling</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">perform_mapping_operations</span><span class="p">();</span> 
+
+  <span class="n">AutoLock</span> <span class="nf">q_lock</span><span class="p">(</span><span class="n">queue_lock</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">pending_shutdown</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">total_active_contexts</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">))</span> <span class="p">{</span>
+    <span class="n">task_scheduler_enabled</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+    <span class="n">launch_task_scheduler</span><span class="p">();</span>
+  <span class="p">}</span> <span class="k">else</span>
+    <span class="n">task_scheduler_enabled</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span> 
+<span class="p">}</span> 
+</code></pre></div>
+<p>So as we can see the mapper has some control over when a context is active via a set of parameters. As long as the context is active the runtime will keep scheduling tasks. Now let&#39;s look to see how some of these parameters are set on the <code>ContextState</code> object. These values (e.g. <code>state.active</code>) are controlled by other calls (e.g. <code>activate_context</code> and <code>deactivate_context</code>). The calls themselves originate from within a context itself (recall that a context is actually a single task), for instance before and after a task starts running, or when scheduling has proceeded far enough into the future.</p>
+
+<h2>Running Mapping Operations</h2>
+
+<p>Recall from above that when the scheduler is enabled <code>ProcessorManager::perform_scheduling</code> is eventually called which in turn calls <code>perform_mapping_operations</code>. This call is where a lot of really important things happen in Legion. We&#39;ll look at this large function in detail now.</p>
+
+<p>The high-level idea of this function is to filter out the ready tasks based on the mapper preferences, and then issue the mapping requests. But there are a lot of different things that can happen along the way. First we create local structures to track state. </p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">perform_mapping_operations</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">multimap</span><span class="o">&lt;</span><span class="n">Processor</span><span class="p">,</span><span class="n">MapperID</span><span class="o">&gt;</span> <span class="n">stealing_targets</span><span class="p">;</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">MapperID</span><span class="o">&gt;</span> <span class="n">mappers_with_work</span><span class="p">;</span>
+</code></pre></div>
+<p>Next we enter a loop over all of the mappers (recall that there is a <code>ready_queue</code> structure per mapper). The first thing we do is create a local copy of the tasks in the ready queues by stashing pointers. We want to quickly create this snapshot so that we can release the locks that protect the queues. We also record the generations, and we&#39;ll talk about that in a few minutes.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">map_id</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">map_id</span> <span class="o">&lt;</span> <span class="n">ready_queues</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">map_id</span><span class="o">++</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;</span> <span class="n">visible_tasks</span><span class="p">;</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">GenerationID</span><span class="o">&gt;</span> <span class="n">visible_generations</span><span class="p">;</span>
+    <span class="p">{</span>
+      <span class="n">AutoLock</span> <span class="n">q_lock</span><span class="p">(</span><span class="n">queue_lock</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*exclusive*/</span><span class="p">);</span>
+      <span class="n">visible_tasks</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">visible_tasks</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span>
+         <span class="n">ready_queues</span><span class="p">[</span><span class="n">map_id</span><span class="p">].</span><span class="n">begin</span><span class="p">(),</span> <span class="n">ready_queues</span><span class="p">[</span><span class="n">map_id</span><span class="p">].</span><span class="n">end</span><span class="p">());</span>
+      <span class="n">visible_generations</span><span class="p">.</span><span class="n">resize</span><span class="p">(</span><span class="n">visible_tasks</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+      <span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+          <span class="n">it</span> <span class="o">!=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">,</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+        <span class="n">visible_generations</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get_generation</span><span class="p">();</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Next we present the list of tasks in the ready queues to the mapper which can set state variables indicating what the mapper wants to do with the task (e.g. schedule it). This is done via the <code>select_tasks_to_schedule</code> mapper callback.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="c1">// Watch me stomp all over the C++ type system here</span>
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">Task</span><span class="o">*&gt;</span> <span class="o">&amp;</span><span class="n">ready_tasks</span> <span class="o">=</span> 
+      <span class="o">*</span><span class="p">((</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">Task</span><span class="o">*&gt;*</span><span class="p">)(</span><span class="o">&amp;</span><span class="p">(</span><span class="n">visible_tasks</span><span class="p">)));</span>
+
+    <span class="c1">// Acquire the mapper lock and ask the mapper about scheduling</span>
+    <span class="c1">// and then about stealing if not disabled</span>
+    <span class="p">{</span>
+      <span class="n">AutoLock</span> <span class="n">map_lock</span><span class="p">(</span><span class="n">mapper_locks</span><span class="p">[</span><span class="n">map_id</span><span class="p">]);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">visible_tasks</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+      <span class="p">{</span>
+        <span class="n">mapper_objects</span><span class="p">[</span><span class="n">map_id</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">select_tasks_to_schedule</span><span class="p">(</span><span class="n">ready_tasks</span><span class="p">);</span>
+      <span class="p">}</span>
+</code></pre></div>
+<p>The mapper will annotate each task with its preference. Next we check with the mapper to see if it wasn&#39;t to steal any work from other mappers. This might occur if the mapper sees that it doesn&#39;t have enough work. We won&#39;t talk much about stealing today, but the blacklist below is used to prevent mappers from generating too many stealing requests when the target stealing mappers don&#39;t actually have any work available.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">stealing_disabled</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">AutoLock</span> <span class="n">steal_lock</span><span class="p">(</span><span class="n">stealing_lock</span><span class="p">);</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Processor</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">blacklist</span> <span class="o">=</span> <span class="n">outstanding_steal_requests</span><span class="p">[</span><span class="n">map_id</span><span class="p">];</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">blacklist</span><span class="p">.</span><span class="n">size</span><span class="p">()</span> <span class="o">&lt;</span> <span class="n">max_outstanding_steals</span><span class="p">)</span>
+        <span class="p">{</span>
+          <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Processor</span><span class="o">&gt;</span> <span class="n">steal_targets</span><span class="p">;</span>
+          <span class="n">mapper_objects</span><span class="p">[</span><span class="n">map_id</span><span class="p">]</span><span class="o">-&gt;</span><span class="n">target_task_steal</span><span class="p">(</span><span class="n">blacklist</span><span class="p">,</span> 
+              <span class="n">steal_targets</span><span class="p">);</span>
+          <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Processor</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+              <span class="n">steal_targets</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">steal_targets</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+          <span class="p">{</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">exists</span><span class="p">()</span> <span class="o">&amp;&amp;</span> <span class="p">((</span><span class="o">*</span><span class="n">it</span><span class="p">)</span> <span class="o">!=</span> <span class="n">local_proc</span><span class="p">)</span> <span class="o">&amp;&amp;</span>
+                <span class="p">(</span><span class="n">blacklist</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">)</span> <span class="o">==</span> <span class="n">blacklist</span><span class="p">.</span><span class="n">end</span><span class="p">()))</span>
+            <span class="p">{</span>
+              <span class="n">stealing_targets</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="n">Processor</span><span class="p">,</span><span class="n">MapperID</span><span class="o">&gt;</span><span class="p">(</span>
+                    <span class="o">*</span><span class="n">it</span><span class="p">,</span><span class="n">map_id</span><span class="p">));</span>
+              <span class="n">blacklist</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">);</span>
+            <span class="p">}</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Now it is time to actually process the list of tasks that the mapper has filtered. Here we iterate over the snapshot and check to see if the mapper wants to schedule the task. The other case that we handle is if the mapper wants to send the task to a different processor. If either case is true then we need to do something with the task. There are two cases that arise directly from the mapper having operated on a snapshot of the tasks in which case transformations on the underlying ready queues may have invalidated the mapper decisions.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="p">{</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;</span> <span class="o">&amp;</span><span class="n">rqueue</span> <span class="o">=</span> <span class="n">ready_queues</span><span class="p">[</span><span class="n">map_id</span><span class="p">];</span>
+      <span class="n">AutoLock</span> <span class="nf">q_lock</span><span class="p">(</span><span class="n">queue_lock</span><span class="p">);</span>
+      <span class="kt">unsigned</span> <span class="n">gen_idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+      <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;::</span><span class="n">iterator</span> <span class="n">vis_it</span> <span class="o">=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> 
+          <span class="n">vis_it</span> <span class="o">!=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">gen_idx</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="k">if</span> <span class="p">((</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">schedule</span> <span class="o">||</span> 
+            <span class="p">((</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">target_proc</span> <span class="o">!=</span> <span class="n">local_proc</span><span class="p">))</span>
+</code></pre></div>
+<p>We need to figure out if the task is still around by looping over the ready queue again. If it isn&#39;t found then something else happened to it (e.g. it was stolen). If we did find it then we need to check that its generation hasn&#39;t changed. This case is a consequence of the implementation that recycles the physical operation C++ objects.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="p">{</span>
+          <span class="kt">bool</span> <span class="n">found</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+          <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;::</span><span class="n">iterator</span> <span class="n">it</span> <span class="o">=</span> <span class="n">rqueue</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+              <span class="n">it</span> <span class="o">!=</span> <span class="n">rqueue</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+          <span class="p">{</span>
+            <span class="c1">// In order to be the same task, they need to have the</span>
+            <span class="c1">// same pointer and have the same generation</span>
+            <span class="k">if</span> <span class="p">(((</span><span class="o">*</span><span class="n">it</span><span class="p">)</span> <span class="o">==</span> <span class="p">(</span><span class="o">*</span><span class="n">vis_it</span><span class="p">))</span> <span class="o">&amp;&amp;</span>
+                <span class="p">(</span><span class="n">visible_generations</span><span class="p">[</span><span class="n">gen_idx</span><span class="p">]</span> <span class="o">==</span> <span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get_generation</span><span class="p">()))</span>
+            <span class="p">{</span>
+              <span class="n">rqueue</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">it</span><span class="p">);</span>
+              <span class="n">found</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+              <span class="k">break</span><span class="p">;</span>
+            <span class="p">}</span>
+          <span class="p">}</span>
+          <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">found</span><span class="p">)</span> <span class="c1">// stolen</span>
+          <span class="p">{</span>
+            <span class="c1">// Remove it from our list</span>
+            <span class="n">vis_it</span> <span class="o">=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">vis_it</span><span class="p">);</span>
+          <span class="p">}</span>
+</code></pre></div>
+<p>If the task wasn&#39;t found then it is removed from the tasks being considered. Not shown is the case where the mapper decided to not schedule it in which case it is also removed from the set of visible tasks. If it was found and the mapper wants to schedule it then it is removed from the ready queue. We then update the context state by decrementing the number of active contexts.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">          <span class="p">{</span>
+            <span class="n">ContextID</span> <span class="n">ctx_id</span> <span class="o">=</span> <span class="p">(</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">get_parent</span><span class="p">()</span><span class="o">-&gt;</span><span class="n">get_context_id</span><span class="p">();</span> 
+            <span class="n">ContextState</span> <span class="o">&amp;</span><span class="n">state</span> <span class="o">=</span> <span class="n">context_states</span><span class="p">[</span><span class="n">ctx_id</span><span class="p">];</span>
+            <span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span><span class="o">--</span><span class="p">;</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">active</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">state</span><span class="p">.</span><span class="n">owned_tasks</span> <span class="o">==</span> <span class="mi">0</span><span class="p">))</span>
+              <span class="n">decrement_active_contexts</span><span class="p">();</span>
+            <span class="n">vis_it</span><span class="o">++</span><span class="p">;</span>
+          <span class="p">}</span>
+</code></pre></div>
+<p>Finally, after processing each mapper if there are remaining tasks on the ready queue we update the local state variable declared at the beginning of the method that says which mappers still have work.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">          <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">rqueue</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+            <span class="n">mappers_with_work</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">map_id</span><span class="p">);</span>
+        <span class="p">}</span>
+</code></pre></div>
+<p>Now we go back through the list of tasks that we need to do something with. That is, the mapper wants the runtime to either run them or move them. In order to handle the task a meta task is launched. We&#39;ll talk about <code>deactive_outstanding_task</code> another time. If a task mapping is deferred (e.g. physical region tree state is not available) then we create an event used as a precondition on the utility task handling the mapping. So, for each task we launch high-level runtime task with the <code>HLR_TRIGGER_TASK_ID</code> variant.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">TriggerTaskArgs</span> <span class="n">args</span><span class="p">;</span>
+    <span class="n">args</span><span class="p">.</span><span class="n">hlr_id</span> <span class="o">=</span> <span class="n">HLR_TRIGGER_TASK_ID</span><span class="p">;</span>
+    <span class="n">args</span><span class="p">.</span><span class="n">manager</span> <span class="o">=</span> <span class="k">this</span><span class="p">;</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">TaskOp</span><span class="o">*&gt;::</span><span class="n">iterator</span> <span class="n">vis_it</span> <span class="o">=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+        <span class="n">vis_it</span> <span class="o">!=</span> <span class="n">visible_tasks</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">vis_it</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// If we made it in here then we have definitely</span>
+      <span class="c1">// pulled the task off of the ready queue</span>
+      <span class="p">(</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">deactivate_outstanding_task</span><span class="p">();</span>
+      <span class="n">Event</span> <span class="n">wait_on</span> <span class="o">=</span> <span class="p">(</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">defer_mapping</span><span class="p">();</span>
+      <span class="c1">// We give a slight priority to triggering the execution</span>
+      <span class="c1">// of tasks relative to other runtime operations because</span>
+      <span class="c1">// they actually have a feedback mechanism controlling</span>
+      <span class="c1">// how far they get ahead.  We give a slight edge in priority</span>
+      <span class="c1">// to tasks being sent remotely to get them in flight.</span>
+      <span class="c1">// Give priority to things which are getting sent remotely</span>
+      <span class="n">args</span><span class="p">.</span><span class="n">op</span> <span class="o">=</span> <span class="o">*</span><span class="n">vis_it</span><span class="p">;</span>
+      <span class="kt">int</span> <span class="n">priority</span> <span class="o">=</span> <span class="p">((</span><span class="o">*</span><span class="n">vis_it</span><span class="p">)</span><span class="o">-&gt;</span><span class="n">target_proc</span> <span class="o">!=</span> <span class="n">local_proc</span><span class="p">)</span> <span class="o">?</span> <span class="mi">2</span> <span class="o">:</span> <span class="mi">1</span><span class="p">;</span>
+      <span class="n">utility_proc</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">HLR_TASK_ID</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">args</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">args</span><span class="p">),</span>
+          <span class="n">wait_on</span><span class="p">,</span> <span class="n">priority</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>The high-level runtime task will trigger execution and if anything fails the task will go back onto the ready queue.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">case</span> <span class="nl">HLR_TRIGGER_TASK_ID</span><span class="p">:</span>
+<span class="p">{</span>
+  <span class="c1">// Key off of args here instead of data</span>
+  <span class="k">const</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">TriggerTaskArgs</span> <span class="o">*</span><span class="n">trigger_args</span> <span class="o">=</span> 
+      <span class="p">(</span><span class="k">const</span> <span class="n">ProcessorManager</span><span class="o">::</span><span class="n">TriggerTaskArgs</span><span class="o">*</span><span class="p">)</span><span class="n">args</span><span class="p">;</span>
+  <span class="n">TaskOp</span> <span class="o">*</span><span class="n">op</span> <span class="o">=</span> <span class="n">trigger_args</span><span class="o">-&gt;</span><span class="n">op</span><span class="p">;</span> 
+  <span class="kt">bool</span> <span class="n">mapped</span> <span class="o">=</span> <span class="n">op</span><span class="o">-&gt;</span><span class="n">trigger_execution</span><span class="p">();</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">mapped</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">ProcessorManager</span> <span class="o">*</span><span class="n">manager</span> <span class="o">=</span> <span class="n">trigger_args</span><span class="o">-&gt;</span><span class="n">manager</span><span class="p">;</span>
+        <span class="n">manager</span><span class="o">-&gt;</span><span class="n">add_to_ready_queue</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="nb">true</span><span class="cm">/*failure*/</span><span class="p">);</span>
+  <span class="p">}</span>
+  <span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Finally, back in <code>perform_mapping_operations</code> we handle the remaining bits of work. First, if stealing is enabled and there were mappers that had remaining tasks on their work queues then this information is broadcast. But who to broadcast this information to? The <code>issue_advertisements</code> is smart and sends the broadcast to those nodes that had previously requested to steal from us but could not because we had no work to do. Recall that we blacklist processors that steal requests were rejected from. This information is used to prevent unnecessary steal requests flooding the network, as well as serving to create the broadcast list here:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Advertise any work that we have</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">stealing_disabled</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">mappers_with_work</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+  <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">MapperID</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+        <span class="n">mappers_with_work</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">mappers_with_work</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">issue_advertisements</span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>If mappers had requested that tasks be stolen, then the very last thing to occur is that these requests are sent out.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Finally issue any steal requeusts</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">stealing_disabled</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">stealing_targets</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+    <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_steal_request</span><span class="p">(</span><span class="n">stealing_targets</span><span class="p">,</span> <span class="n">local_proc</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

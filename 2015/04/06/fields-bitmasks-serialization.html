@@ -1,0 +1,472 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #16: Fields, Bitmasks, and Serialization</title>
+  <meta name="description" content="Overview">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/04/06/fields-bitmasks-serialization.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #16: Fields, Bitmasks, and Serialization</h1>
+    <p class="post-meta">Apr 6, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>Overview</h1>
+
+<p>In this class we&#39;ll look at fields, bitmasks, and serialization and deserialization.</p>
+
+<h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/JBU8f3itT2Y" frameborder="0" allowfullscreen></iframe>
+
+<h1>Dynamic Tree</h1>
+
+<p>Recall from the discussion regarding the region tree that objects attached a <code>RegionTreeNode</code> are used to track logical and physical state (see <code>region_tree.h</code>). In that post it was discussed that the structure, <code>LegionStack</code>, is a fixed size structure, and when things like new fields are allocated all of these structures in the tree may need to be adjusted. That has now changed.</p>
+
+<p>A dynamic table has been added to the high-level runtime that replaces the <code>LegionStack</code> for tracking logical and physical state, allowing for dynamic allocation. The implementation is in <code>legion_utilities.h</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span> <span class="n">ALLOCATOR</span><span class="o">&gt;</span>
+    <span class="k">class</span> <span class="nc">DynamicTable</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="k">typedef</span> <span class="k">typename</span> <span class="n">ALLOCATOR</span><span class="o">::</span><span class="n">IT</span> <span class="n">IT</span><span class="p">;</span>
+      <span class="k">typedef</span> <span class="k">typename</span> <span class="n">ALLOCATOR</span><span class="o">::</span><span class="n">ET</span> <span class="n">ET</span><span class="p">;</span>
+      <span class="k">typedef</span> <span class="n">DynamicTableNodeBase</span><span class="o">&lt;</span><span class="n">IT</span><span class="o">&gt;</span> <span class="n">NodeBase</span><span class="p">;</span>
+    <span class="k">public</span><span class="o">:</span>
+    <span class="p">...</span>
+</code></pre></div>
+<p>It is very similar to the low-level implementation, but rather than allocating full structures at the leafs, pointers are stored in the high-level runtime version that saves space when sparsely filled.</p>
+
+<p>There are a lot of other helpful things that are located in <code>legion_utilities.h</code>.</p>
+
+<h1>Region Usage</h1>
+
+<p>The <code>RegionUsage</code> object stores information about privileges, coherence, and reductions, and is used during dependence analysis.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">struct</span> <span class="n">RegionUsage</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">RegionUsage</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">privilege</span><span class="p">(</span><span class="n">NO_ACCESS</span><span class="p">),</span> <span class="n">prop</span><span class="p">(</span><span class="n">EXCLUSIVE</span><span class="p">),</span> <span class="n">redop</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span> <span class="p">{</span> <span class="p">}</span>
+      <span class="n">RegionUsage</span><span class="p">(</span><span class="n">PrivilegeMode</span> <span class="n">p</span><span class="p">,</span> <span class="n">CoherenceProperty</span> <span class="n">c</span><span class="p">,</span> <span class="n">ReductionOpID</span> <span class="n">r</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">privilege</span><span class="p">(</span><span class="n">p</span><span class="p">),</span> <span class="n">prop</span><span class="p">(</span><span class="n">c</span><span class="p">),</span> <span class="n">redop</span><span class="p">(</span><span class="n">r</span><span class="p">)</span> <span class="p">{</span> <span class="p">}</span>
+      <span class="n">RegionUsage</span><span class="p">(</span><span class="k">const</span> <span class="n">RegionRequirement</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">privilege</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">privilege</span><span class="p">),</span> <span class="n">prop</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">prop</span><span class="p">),</span> <span class="n">redop</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">redop</span><span class="p">)</span> <span class="p">{</span> <span class="p">}</span>
+    <span class="k">public</span><span class="o">:</span>
+    <span class="p">...</span>
+</code></pre></div>
+<h1>Dependence Checks</h1>
+
+<p>There are several static functions that are used to define different checks that are made during dependence analysis that encode some policy, for instance <code>check_dependence_type</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">static</span> <span class="kr">inline</span> <span class="n">DependenceType</span> <span class="n">check_dependence_type</span><span class="p">(</span><span class="k">const</span> <span class="n">RegionUsage</span> <span class="o">&amp;</span><span class="n">u1</span><span class="p">,</span>
+                                                       <span class="k">const</span> <span class="n">RegionUsage</span> <span class="o">&amp;</span><span class="n">u2</span><span class="p">)</span>
+    <span class="p">...</span>
+</code></pre></div>
+<h1>AutoLock</h1>
+
+<p>We&#39;ve seen the auto lock many times before, which basically implements RAII pattern but is a little more feature rich than your standard mutex.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">AutoLock</span> <span class="p">{</span> 
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">AutoLock</span><span class="p">(</span><span class="n">Reservation</span> <span class="n">r</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="n">mode</span> <span class="o">=</span> <span class="mi">0</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">exclusive</span> <span class="o">=</span> <span class="nb">true</span><span class="p">,</span> 
+</code></pre></div>
+<h1>Serialization</h1>
+
+<p>Helpers for implementing serialization and deserialization for sending data across the network.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">Serializer</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">Serializer</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">base_bytes</span> <span class="o">=</span> <span class="mi">4096</span><span class="p">)</span>
+    <span class="p">...</span>
+
+    <span class="k">class</span> <span class="nc">Deserializer</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">Deserializer</span><span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">buf</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">buffer_size</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">total_bytes</span><span class="p">(</span><span class="n">buffer_size</span><span class="p">),</span> <span class="n">buffer</span><span class="p">((</span><span class="k">const</span> <span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">buf</span><span class="p">),</span> <span class="n">index</span><span class="p">(</span><span class="mi">0</span><span class="p">)</span>
+    <span class="p">...</span>
+</code></pre></div>
+<h1>Bit Mask</h1>
+
+<p>Another major utility component in Legion is a big mask. It&#39;s pretty much just how it sounds. It&#39;s used to describe lots of things like sets of fields and processors and nodes.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span> <span class="n">T</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">MAX</span><span class="p">,</span>
+             <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">SHIFT</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="kt">int</span> <span class="n">MASK</span><span class="o">&gt;</span>
+    <span class="k">class</span> <span class="nc">BitMask</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="k">explicit</span> <span class="n">BitMask</span><span class="p">(</span><span class="n">T</span> <span class="n">init</span> <span class="o">=</span> <span class="mi">0</span><span class="p">);</span>
+</code></pre></div>
+<p>It has a large interface that includes all sorts of set-like operations. The basic bit mask has a dense structure holding the bits. There is a two level bit mask that includes a summary mask that makes certain operations and tests very fast. Additionally, there are SSE and AVX optimized versions. Logic for selecting between the different implements is done at compile time:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="cp">#if defined(__AVX__)</span>
+<span class="cp">#if (MAX_FIELDS &gt; 256)</span>
+    <span class="k">typedef</span> <span class="n">AVXTLBitMask</span><span class="o">&lt;</span><span class="n">MAX_FIELDS</span><span class="o">&gt;</span> <span class="n">FieldMask</span><span class="p">;</span>
+<span class="cp">#elif (MAX_FIELDS &gt; 128)</span>
+    <span class="k">typedef</span> <span class="n">AVXBitMask</span><span class="o">&lt;</span><span class="n">MAX_FIELDS</span><span class="o">&gt;</span> <span class="n">FieldMask</span><span class="p">;</span>
+<span class="cp">#elif (MAX_FIELDS &gt; 64)</span>
+    <span class="k">typedef</span> <span class="n">SSEBitMask</span><span class="o">&lt;</span><span class="n">MAX_FIELDS</span><span class="o">&gt;</span> <span class="n">FieldMask</span><span class="p">;</span>
+<span class="cp">#else</span>
+    <span class="k">typedef</span> <span class="n">BitMask</span><span class="o">&lt;</span><span class="n">FIELD_TYPE</span><span class="p">,</span><span class="n">MAX_FIELDS</span><span class="p">,</span><span class="n">FIELD_SHIFT</span><span class="p">,</span><span class="n">FIELD_MASK</span><span class="o">&gt;</span> <span class="n">FieldMask</span><span class="p">;</span>
+<span class="cp">#endif</span>
+<span class="cp">#elif defined(__SSE2__)</span>
+
+<span class="p">....</span>
+</code></pre></div>
+<p>There are similar bits for NodeMask, ProcessorMask, etc..., in addition to FieldMask.</p>
+
+<h1>Field Space Node</h1>
+
+<p>Now we&#39;ll take a look at how fields are allocated. Some application will create a field allocator, and will allocate some fields by calling <code>FieldAllocator::allocate_field</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">FieldAllocator</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">FieldAllocator</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+      <span class="p">...</span>
+      <span class="kr">inline</span> <span class="n">FieldID</span> <span class="n">allocate_field</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">field_size</span><span class="p">,</span> 
+              <span class="n">FieldID</span> <span class="n">desired_fieldid</span> <span class="o">=</span> <span class="n">AUTO_GENERATE_ID</span><span class="p">);</span>
+      <span class="p">...</span>
+</code></pre></div>
+<p>The size of the field is given, and some desired field id (but one can be auto generated, too). Below, the <code>local</code> parameter is used to specify if the field won&#39;t escape the task&#39;s context.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kr">inline</span> <span class="n">FieldID</span> <span class="n">FieldAllocator</span><span class="o">::</span><span class="n">allocate_field</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">field_size</span><span class="p">,</span> 
+                                <span class="n">FieldID</span> <span class="n">desired_fieldid</span> <span class="cm">/*= AUTO_GENERATE_ID*/</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">return</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">field_space</span><span class="p">,</span> 
+                                 <span class="n">field_size</span><span class="p">,</span> <span class="n">desired_fieldid</span><span class="p">,</span> <span class="nb">false</span><span class="cm">/*local*/</span><span class="p">);</span> 
+    <span class="p">}</span>
+</code></pre></div>
+<p>Now we&#39;ve made it into the runtime. First thing is to grab a unique field id if one wasn&#39;t provided. We&#39;ve covered unique ID creation before (recall that it uses the node ID as a stride within a space). Then we ask the forest to allocate the new field.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">FieldID</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">Context</span> <span class="n">ctx</span><span class="p">,</span> <span class="n">FieldSpace</span> <span class="n">space</span><span class="p">,</span>
+                                          <span class="kt">size_t</span> <span class="n">field_size</span><span class="p">,</span> <span class="n">FieldID</span> <span class="n">fid</span><span class="p">,</span>
+                                          <span class="kt">bool</span> <span class="n">local</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">fid</span> <span class="o">==</span> <span class="n">AUTO_GENERATE_ID</span><span class="p">)</span>
+        <span class="n">fid</span> <span class="o">=</span> <span class="n">get_unique_field_id</span><span class="p">();</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">local</span><span class="p">)</span>
+        <span class="n">ctx</span><span class="o">-&gt;</span><span class="n">add_local_field</span><span class="p">(</span><span class="n">space</span><span class="p">,</span> <span class="n">fid</span><span class="p">,</span> <span class="n">field_size</span><span class="p">);</span>
+      <span class="k">else</span>
+      <span class="p">{</span>
+        <span class="n">forest</span><span class="o">-&gt;</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">space</span><span class="p">,</span> <span class="n">field_size</span><span class="p">,</span> <span class="n">fid</span><span class="p">,</span> <span class="n">local</span><span class="p">);</span>
+        <span class="n">ctx</span><span class="o">-&gt;</span><span class="n">register_field_creation</span><span class="p">(</span><span class="n">space</span><span class="p">,</span> <span class="n">fid</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="k">return</span> <span class="n">fid</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>So far so good. We&#39;ll cover the common case below which, after looking up the node, is to just call <code>allocate_field</code> on the node.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">bool</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">FieldSpace</span> <span class="n">handle</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">field_size</span><span class="p">,</span>
+                                          <span class="n">FieldID</span> <span class="n">fid</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">local</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">node</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">local</span> <span class="o">&amp;&amp;</span> <span class="n">node</span><span class="o">-&gt;</span><span class="n">has_field</span><span class="p">(</span><span class="n">fid</span><span class="p">))</span>
+        <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+      <span class="n">node</span><span class="o">-&gt;</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">fid</span><span class="p">,</span> <span class="n">field_size</span><span class="p">,</span> <span class="n">local</span><span class="p">);</span>
+      <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Ok, now we get to more interesting stuff. First thing is to allocate an index. An index can be thought of as a bit in a bit mask. In particular, we are concerned with the <code>FieldMask</code> which is a bitmask. We create a mapping between field ID and bitmask index, and want to find an index that is free.</p>
+
+<p>The field mask tells us what fields have been allocated. Legion supports parallel field allocation. We want to do parallel allocation without communication, so we&#39;d like each node to be able to select an index without communication. For this reason, the same field ID may map to different index values on different nodes. To handle comparisons, permutations are computed when bitmasks are transported.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">allocate_field</span><span class="p">(</span><span class="n">FieldID</span> <span class="n">fid</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">size</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">local</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">AutoLock</span> <span class="n">n_lock</span><span class="p">(</span><span class="n">node_lock</span><span class="p">);</span>
+      <span class="c1">// Find an index in which to allocate this field  </span>
+      <span class="kt">unsigned</span> <span class="n">index</span> <span class="o">=</span> <span class="n">allocate_index</span><span class="p">(</span><span class="n">local</span><span class="p">);</span>
+
+      <span class="n">fields</span><span class="p">[</span><span class="n">fid</span><span class="p">]</span> <span class="o">=</span> <span class="n">FieldInfo</span><span class="p">(</span><span class="n">size</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> <span class="n">local</span><span class="p">);</span>
+      <span class="c1">// Send messages to all our subscribers telling them about the allocation</span>
+      <span class="c1">// as long as it is not local.  Local fields get sent by the task contexts</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">local</span> <span class="o">&amp;&amp;</span> <span class="o">!!</span><span class="n">creation_set</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">SendFieldAllocationFunctor</span> <span class="n">functor</span><span class="p">(</span><span class="n">handle</span><span class="p">,</span> <span class="n">fid</span><span class="p">,</span> <span class="n">size</span><span class="p">,</span> 
+                                           <span class="n">index</span><span class="p">,</span> <span class="n">context</span><span class="o">-&gt;</span><span class="n">runtime</span><span class="p">);</span>
+        <span class="n">creation_set</span><span class="p">.</span><span class="n">map</span><span class="p">(</span><span class="n">functor</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>So how do we allocate an index? The goal below is used as a preference to reduce the permutations between nodes. If the goal isn&#39;t set in the allocated indexes structure, we&#39;ll take it.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">unsigned</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">allocate_index</span><span class="p">(</span><span class="kt">bool</span> <span class="n">local</span><span class="p">,</span> <span class="kt">int</span> <span class="n">goal</span> <span class="cm">/*= -1*/</span><span class="p">)</span>
+    <span class="c1">//--------------------------------------------------------------------------</span>
+    <span class="p">{</span>
+      <span class="c1">// Assume we are already holding the node lock</span>
+
+      <span class="c1">// We do something intelligent here to try and maintain</span>
+      <span class="c1">// identity permutations as long as possible.  First, if there</span>
+      <span class="c1">// is a target goal try and allocate it there since it has already</span>
+      <span class="c1">// been assigned there on a remote node.</span>
+      <span class="k">if</span> <span class="p">((</span><span class="n">goal</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">allocated_indexes</span><span class="p">.</span><span class="n">is_set</span><span class="p">(</span><span class="n">goal</span><span class="p">))</span>
+      <span class="p">{</span>
+        <span class="kt">unsigned</span> <span class="n">result</span> <span class="o">=</span> <span class="n">goal</span><span class="p">;</span>
+        <span class="n">allocated_indexes</span><span class="p">.</span><span class="n">set_bit</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+        <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">...</span>
+</code></pre></div>
+<p>Here is the <code>allocated_indexes</code> mask in the <code>FieldSpaceNode</code> structure.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">FieldSpaceNode</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+    <span class="p">...</span>
+      <span class="n">FieldMask</span> <span class="n">allocated_indexes</span><span class="p">;</span>
+    <span class="p">...</span>
+</code></pre></div>
+<p>If we don&#39;t have a goal, then we need to find an open index. We won&#39;t cover the remainder of the <code>allocate_index</code> call. Basically there is an optimization in which a unique ID is computed, and one where a random guess is made.</p>
+
+<p>The most frequently used method on the field node is to get the field mask from a set of field IDs. Recall that region requirements will specify which fields they care about. So the translation from field ID to the compact field mask is performed frequently.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="n">FieldMask</span> <span class="n">get_field_mask</span><span class="p">(</span><span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">fields</span><span class="p">)</span> <span class="k">const</span><span class="p">;</span>
+</code></pre></div>
+<p>For each field ID we look up the FieldInfo structure that we set when allocating the field, and grab the index out of there and set it in the bitmask that will be returned.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">FieldMask</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">get_field_mask</span><span class="p">(</span>
+                              <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">privilege_fields</span><span class="p">)</span> <span class="k">const</span>
+    <span class="p">{</span>
+      <span class="n">AutoLock</span> <span class="n">n_lock</span><span class="p">(</span><span class="n">node_lock</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*exclusive*/</span><span class="p">);</span>
+      <span class="n">FieldMask</span> <span class="n">result</span><span class="p">;</span>
+      <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> <span class="n">privilege_fields</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+            <span class="n">it</span> <span class="o">!=</span> <span class="n">privilege_fields</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="p">,</span><span class="n">FieldInfo</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">finder</span> <span class="o">=</span> <span class="n">fields</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="o">*</span><span class="n">it</span><span class="p">);</span>
+        <span class="n">result</span><span class="p">.</span><span class="n">set_bit</span><span class="p">(</span><span class="n">finder</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">idx</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Here is an example of where grabbing the field mask is used:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">perform_dependence_analysis</span><span class="p">(</span><span class="n">RegionTreeContext</span> <span class="n">ctx</span><span class="p">,</span>
+                                                  <span class="n">Operation</span> <span class="o">*</span><span class="n">op</span><span class="p">,</span> <span class="kt">unsigned</span> <span class="n">idx</span><span class="p">,</span>
+                                                  <span class="n">RegionRequirement</span> <span class="o">&amp;</span><span class="n">req</span><span class="p">,</span>
+                                                  <span class="n">RegionTreePath</span> <span class="o">&amp;</span><span class="n">path</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// If this is a NO_ACCESS, then we&#39;ll have no dependences so we&#39;re done</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">IS_NO_ACCESS</span><span class="p">(</span><span class="n">req</span><span class="p">))</span>
+        <span class="k">return</span><span class="p">;</span>
+
+      <span class="n">RegionNode</span> <span class="o">*</span><span class="n">parent_node</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">parent</span><span class="p">);</span>
+
+      <span class="n">FieldMask</span> <span class="n">user_mask</span> <span class="o">=</span> 
+        <span class="n">parent_node</span><span class="o">-&gt;</span><span class="n">column_source</span><span class="o">-&gt;</span><span class="n">get_field_mask</span><span class="p">(</span><span class="n">req</span><span class="p">.</span><span class="n">privilege_fields</span><span class="p">);</span>
+</code></pre></div>
+<h1>Serialization</h1>
+
+<p>Now we&#39;ll look very briefly at region tree node serialization. Nodes are often sent around to other machines. It all starts with <code>send_node</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">send_node</span><span class="p">(</span><span class="n">AddressSpaceID</span> <span class="n">target</span><span class="p">)</span>
+    <span class="c1">//--------------------------------------------------------------------------</span>
+    <span class="p">{</span>
+      <span class="c1">// See if this is in our creation set, if not, send it and all the fields</span>
+      <span class="n">AutoLock</span> <span class="n">n_lock</span><span class="p">(</span><span class="n">node_lock</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">creation_set</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">target</span><span class="p">))</span>
+      <span class="p">{</span>
+</code></pre></div>
+<p>The <code>creation_set</code> determines if we have already sent this node to a particular target in order to avoid sending it multiple times. The <code>creation_set</code> is of type <code>NodeSet</code>. A NodeSet is similar to the other mask structures we saw, but is efficient when sparse.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">public</span><span class="o">:</span>
+      <span class="n">NodeSet</span> <span class="n">creation_set</span><span class="p">;</span>
+      <span class="n">NodeSet</span> <span class="n">destruction_set</span><span class="p">;</span>
+</code></pre></div>
+<p>If the target isn&#39;t in the creation set then we need to pack it up and send it off. The Serializer object knows how do that. So we pack up all the metadata for the object we are sending, and then fire it off.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="c1">// First send the node info and then send all the fields</span>
+        <span class="n">Serializer</span> <span class="n">rez</span><span class="p">;</span>
+        <span class="p">{</span>
+          <span class="n">RezCheck</span> <span class="n">z</span><span class="p">(</span><span class="n">rez</span><span class="p">);</span>
+          <span class="n">rez</span><span class="p">.</span><span class="n">serialize</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+          <span class="n">rez</span><span class="p">.</span><span class="n">serialize</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span><span class="p">(</span><span class="n">semantic_info</span><span class="p">.</span><span class="n">size</span><span class="p">());</span>
+          <span class="k">for</span> <span class="p">(</span><span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">SemanticTag</span><span class="p">,</span><span class="n">SemanticInfo</span><span class="o">&gt;::</span><span class="n">aligned</span><span class="o">::</span><span class="n">iterator</span> <span class="n">it</span> <span class="o">=</span> 
+                <span class="n">semantic_info</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">semantic_info</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+          <span class="p">{</span>
+          <span class="p">...</span>
+        <span class="p">}</span>
+        <span class="n">context</span><span class="o">-&gt;</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_field_space_node</span><span class="p">(</span><span class="n">target</span><span class="p">,</span> <span class="n">rez</span><span class="p">);</span>
+</code></pre></div>
+<p>After we&#39;ve sent off the node to be created, we send off the field info. Note that the low-level messenger ensure that messages are received in sending order, so we don&#39;t have to worry about the target getting a request to allocate new fields on a node it hasn&#39;t seen yet.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="c1">// Send all the field allocations</span>
+        <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="p">,</span><span class="n">FieldInfo</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+              <span class="n">fields</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">fields</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+        <span class="p">{</span>
+          <span class="c1">// No need to send it if it has been destroyed</span>
+          <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">destroyed</span><span class="p">)</span>
+          <span class="p">{</span>
+            <span class="n">context</span><span class="o">-&gt;</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_field_allocation</span><span class="p">(</span><span class="n">handle</span><span class="p">,</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">first</span><span class="p">,</span>
+                <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">field_size</span><span class="p">,</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">.</span><span class="n">idx</span><span class="p">,</span> <span class="n">target</span><span class="p">);</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+</code></pre></div>
+<p>Now record that we don&#39;t need to send again in the <code>creation_set</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="c1">// Finally add it to the creation set</span>
+        <span class="n">creation_set</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="c1">// Send any deletions if necessary</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">destruction_set</span><span class="p">.</span><span class="n">contains</span><span class="p">(</span><span class="n">target</span><span class="p">))</span>
+      <span class="p">{</span>
+        <span class="n">context</span><span class="o">-&gt;</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_field_space_destruction</span><span class="p">(</span><span class="n">handle</span><span class="p">,</span> <span class="n">target</span><span class="p">);</span>
+        <span class="n">destruction_set</span><span class="p">.</span><span class="n">add</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>On the receiving side we unpack the bits for the FieldSpace node by deserializing them in exact same order. Note that the <code>DerezCheck</code> does some basic error checking. Recall from above the <code>RezCheck</code> call. These are matched up and serve as a very simple checksum that simply counts the number of bytes involved in the serialization step.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="cm">/*static*/</span> <span class="kt">void</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">handle_node_creation</span><span class="p">(</span>
+          <span class="n">RegionTreeForest</span> <span class="o">*</span><span class="n">context</span><span class="p">,</span> <span class="n">Deserializer</span> <span class="o">&amp;</span><span class="n">derez</span><span class="p">,</span> <span class="n">AddressSpaceID</span> <span class="n">source</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">DerezCheck</span> <span class="n">z</span><span class="p">(</span><span class="n">derez</span><span class="p">);</span>
+      <span class="n">FieldSpace</span> <span class="n">handle</span><span class="p">;</span>
+      <span class="n">derez</span><span class="p">.</span><span class="n">deserialize</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+      <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">node</span> <span class="o">=</span> <span class="n">context</span><span class="o">-&gt;</span><span class="n">create_node</span><span class="p">(</span><span class="n">handle</span><span class="p">);</span>
+
+      <span class="n">node</span><span class="o">-&gt;</span><span class="n">add_creation_source</span><span class="p">(</span><span class="n">source</span><span class="p">);</span>
+      <span class="kt">size_t</span> <span class="n">num_semantic</span><span class="p">;</span>
+      <span class="n">derez</span><span class="p">.</span><span class="n">deserialize</span><span class="p">(</span><span class="n">num_semantic</span><span class="p">);</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">num_semantic</span><span class="p">;</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">SemanticTag</span> <span class="n">tag</span><span class="p">;</span>
+        <span class="n">derez</span><span class="p">.</span><span class="n">deserialize</span><span class="p">(</span><span class="n">tag</span><span class="p">);</span>
+      <span class="p">...</span>
+    <span class="p">}</span>
+</code></pre></div>
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

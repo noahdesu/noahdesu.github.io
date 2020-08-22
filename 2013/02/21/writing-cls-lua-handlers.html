@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Writing RADOS Object Class Handlers in Lua</title>
+  <meta name="description" content="This post describes the API of the Lua object class handler system.  In a previous postI provided some motivation for the project, and provided a description...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2013/02/21/writing-cls-lua-handlers.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Writing RADOS Object Class Handlers in Lua</h1>
+    <p class="post-meta">Feb 21, 2013
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <p>This post describes the API of the Lua object class handler system.  In a <a href="http://noahdesu.github.com/2013/02/04/handler-semantics-in-cls-lua.html">previous post</a>
+I provided some motivation for the project, and provided a description of the
+Lua object class error handling design.  Another helpful resource is the <a href="/test_cls_lua.lua.txt">Lua
+script used for internal unit testing</a> that has working
+examples of the entire API.</p>
+
+<h2>Lua Object Class Structure</h2>
+
+<p>A Lua object class is an arbitrary Lua script containing at least one exported
+function handler that serves as a named entry point.  By building up a
+collection of handlers, new and interesting interfaces to objects can be
+constructed and dynamically loaded into a running RADOS cluster. The basic
+structure is shown in the following code snippet:</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="c1">-- helper modules</span>
+<span class="c1">-- helper functions</span>
+<span class="c1">-- etc...</span>
+
+<span class="k">function</span> <span class="nf">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">handler1</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">handler2</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+<span class="k">end</span>
+
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handler1</span><span class="p">)</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">handler2</span><span class="p">)</span></code></pre></figure>
+
+<p>In the above Lua script any number of functions and modules can be used to
+support the behavior exported by the functions <code>handler1</code> and <code>handler2</code>. A
+client can remotely execute any registered function and provide an arbitrary
+input, and receive an arbitrary output. Attempting to call an unregistered
+handler results in a error.</p>
+
+<h2>Logging and Tracing</h2>
+
+<p>An object class can write into the OSD log to record debugging information
+using the <code>log</code> function. The function takes any number of arguments which are
+converted into strings and separated by spaces in the final output. If the
+first argument is numeric then it is interpreted as a log-level. If no
+log-level is specified a default log-level is used.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">hi&#39;</span><span class="p">)</span>         <span class="c1">-- will log &#39;hi&#39;</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="s1">&#39;</span><span class="s">ouch&#39;</span><span class="p">)</span>    <span class="c1">-- log &#39;ouch&#39; at log-level = 0</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="s1">&#39;</span><span class="s">foo&#39;</span><span class="p">,</span> <span class="s1">&#39;</span><span class="s">bar&#39;</span><span class="p">)</span> <span class="c1">-- log &#39;foo bar&#39;</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">log</span><span class="p">(</span><span class="mi">1</span><span class="p">)</span>            <span class="c1">-- will log &#39;1&#39; at default log-level</span></code></pre></figure>
+
+<p>Logging can also be used to trace execution to aid in debugging. Any message
+logged using the <code>log</code> function will also be recorded in an ordered list and
+returned to the client after execution. A client can print the list to view
+the order of execution, analogous to using <code>printf</code> statements for debugging.</p>
+
+<h2>Handler Registration</h2>
+
+<p>Object classes written in Lua may have many functions, only a subset of which
+represent entry points to the functionality provided by the script. In order
+to be able to call a function defined in a Lua object class, the function must
+first be exported by registering it. This is done using the <code>register</code>
+function. The following code snippet illustrates how this works.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">helper</span><span class="p">()</span>
+  <span class="c1">-- help out with stuff</span>
+<span class="k">end</span>
+
+<span class="k">function</span> <span class="nf">thehandler</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">helper</span><span class="p">()</span>
+<span class="k">end</span>
+
+<span class="n">cls</span><span class="p">.</span><span class="n">register</span><span class="p">(</span><span class="n">thehandler</span><span class="p">)</span></code></pre></figure>
+
+<p>In the above example <code>cls.register(thehandler)</code> exports the function
+<code>thehandler</code>, making it available for clients to access. A client that
+attempts to call the <code>helper</code> function (an unregistered function), will
+receive a return value of <code>-ENOTSUPP</code>.</p>
+
+<h2>Metadata and Life Cycle</h2>
+
+<p>Use the <code>stat</code> function to retrieve object size and modification time
+information.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="c1">-- grab both stats</span>
+<span class="n">size</span><span class="p">,</span> <span class="n">mtime</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">stat</span><span class="p">()</span>
+<span class="c1">-- only size</span>
+<span class="n">size</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">stat</span><span class="p">()</span></code></pre></figure>
+
+<p>An object is created using the <code>create</code> function which takes a boolean
+parameter specifying exclusivity semantics. If <code>true</code> is passed to <code>create</code>
+and the object already exists then <code>-ENOENT</code> is returned.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">cls</span><span class="p">.</span><span class="n">create</span><span class="p">(</span><span class="kc">false</span><span class="p">)</span>
+<span class="n">ok</span><span class="p">,</span> <span class="n">ret</span> <span class="o">=</span> <span class="nb">pcall</span><span class="p">(</span><span class="n">cls</span><span class="p">.</span><span class="n">create</span><span class="p">,</span> <span class="kc">true</span><span class="p">)</span>
+<span class="nb">assert</span><span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="o">-</span><span class="n">cls</span><span class="p">.</span><span class="n">ENOENT</span><span class="p">)</span></code></pre></figure>
+
+<p>An object is deleted using the <code>remove</code> function.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">cls</span><span class="p">.</span><span class="n">remove</span><span class="p">()</span></code></pre></figure>
+
+<h2>Object Payload I/O</h2>
+
+<p>The payload data of an object can be read from and written to using the <code>read</code>
+and <code>write</code> functions. Each function takes an offset and length parameter.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="n">size</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">stat</span><span class="p">()</span>
+<span class="n">data</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">read</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">size</span><span class="p">)</span>          <span class="c1">-- size bytes from offset 0</span>
+<span class="n">cls</span><span class="p">.</span><span class="n">write</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">data</span><span class="p">:</span><span class="n">length</span><span class="p">(),</span> <span class="n">data</span><span class="p">)</span> <span class="c1">-- length of data at offset 0</span></code></pre></figure>
+
+<h2>Indexing</h2>
+
+<p>A key/value store supporting range queries (based on Google&#39;s LevelDB) can be
+accessed using the <code>map_set_val</code> and <code>map_get_val</code> functions. A key can be any
+string and a value is a standard blob of any size.</p>
+
+<figure class="highlight"><pre><code class="language-lua" data-lang="lua"><span class="k">function</span> <span class="nf">handler</span><span class="p">(</span><span class="n">input</span><span class="p">,</span> <span class="n">output</span><span class="p">)</span>
+  <span class="n">cls</span><span class="p">.</span><span class="n">map_set_val</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">foo&quot;</span><span class="p">,</span> <span class="n">input</span><span class="p">)</span>
+  <span class="n">data</span> <span class="o">=</span> <span class="n">cls</span><span class="p">.</span><span class="n">map_get_val</span><span class="p">(</span><span class="s2">&quot;</span><span class="s">foo&quot;</span><span class="p">)</span>
+  <span class="nb">assert</span><span class="p">(</span><span class="n">data</span> <span class="o">==</span> <span class="n">input</span><span class="p">)</span>
+<span class="k">end</span></code></pre></figure>
+
+<p><strong>Note:</strong> there are additional functions for interacting with the indexing
+service that are not reflected in the Lua bindings. While we covered the major
+components, we are expanding the interface as needed. If you need, please ask!</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

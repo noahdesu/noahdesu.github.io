@@ -1,0 +1,429 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>How Does Legion Handle a Low-memory Situation?</title>
+  <meta name="description" content="Here is a very simple single task Legion application that creates an inline mapping. We&#39;ll look to see what happens when this mapping becomes too large, ...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/01/30/how-does-legion-handle-a-low-memory-situation.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">How Does Legion Handle a Low-memory Situation?</h1>
+    <p class="post-meta">Jan 30, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <p>Here is a very simple single task Legion application that creates an inline mapping. We&#39;ll look to see what happens when this mapping becomes too large, and trace through the code associated with the scenario.</p>
+
+<p>The application itself creates a 1D array with a single 64-bit field. The top-level task performs an inline mapping and immediately destroys the mapping and exits.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="cp">#include &quot;legion.h&quot;</span>
+
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">LegionRuntime</span><span class="o">::</span><span class="n">HighLevel</span><span class="p">;</span>
+<span class="k">using</span> <span class="k">namespace</span> <span class="n">LegionRuntime</span><span class="o">::</span><span class="n">Accessor</span><span class="p">;</span>
+
+<span class="k">enum</span> <span class="n">TaskIDs</span> <span class="p">{</span>
+  <span class="n">TOP_LEVEL_TASK_ID</span><span class="p">,</span>
+<span class="p">};</span>
+
+<span class="k">enum</span> <span class="n">FieldIDs</span> <span class="p">{</span>
+  <span class="n">FID_X</span>
+<span class="p">};</span>
+
+<span class="kt">void</span> <span class="nf">top_level_task</span><span class="p">(</span><span class="k">const</span> <span class="n">Task</span> <span class="o">*</span><span class="n">task</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;&amp;</span> <span class="n">regions</span><span class="p">,</span>
+    <span class="n">Context</span> <span class="n">ctx</span><span class="p">,</span> <span class="n">HighLevelRuntime</span> <span class="o">*</span><span class="n">runtime</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">int</span> <span class="n">num_elements</span> <span class="o">=</span> <span class="mi">1</span><span class="o">&lt;&lt;</span><span class="mi">15</span><span class="p">;</span>
+
+  <span class="c1">// Single &quot;array&quot; with num_elements points</span>
+  <span class="n">Rect</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span> <span class="n">rect</span><span class="p">(</span><span class="n">Point</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="mi">0</span><span class="p">),</span> <span class="n">Point</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">num_elements</span><span class="o">-</span><span class="mi">1</span><span class="p">));</span>
+  <span class="n">IndexSpace</span> <span class="n">is</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">create_index_space</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">Domain</span><span class="o">::</span><span class="n">from_rect</span><span class="o">&lt;</span><span class="mi">1</span><span class="o">&gt;</span><span class="p">(</span><span class="n">rect</span><span class="p">));</span>
+
+  <span class="c1">// One field per array element of sizeof(uint64_t) bytes</span>
+  <span class="n">FieldSpace</span> <span class="n">fs</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">create_field_space</span><span class="p">(</span><span class="n">ctx</span><span class="p">);</span>
+  <span class="n">FieldAllocator</span> <span class="n">fa</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">create_field_allocator</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">fs</span><span class="p">);</span>
+  <span class="n">fa</span><span class="p">.</span><span class="n">allocate_field</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">uint64_t</span><span class="p">),</span> <span class="n">FID_X</span><span class="p">);</span>
+
+  <span class="c1">// Create and map a logical region</span>
+  <span class="n">LogicalRegion</span> <span class="n">lr</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">create_logical_region</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">is</span><span class="p">,</span> <span class="n">fs</span><span class="p">);</span>
+
+  <span class="n">RegionRequirement</span> <span class="n">req</span><span class="p">(</span><span class="n">lr</span><span class="p">,</span> <span class="n">READ_WRITE</span><span class="p">,</span> <span class="n">EXCLUSIVE</span><span class="p">,</span> <span class="n">lr</span><span class="p">);</span>
+  <span class="n">req</span><span class="p">.</span><span class="n">add_field</span><span class="p">(</span><span class="n">FID_X</span><span class="p">);</span>
+
+  <span class="n">InlineLauncher</span> <span class="n">launcher</span><span class="p">(</span><span class="n">req</span><span class="p">);</span>
+  <span class="n">PhysicalRegion</span> <span class="n">region</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">map_region</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">launcher</span><span class="p">);</span>
+
+  <span class="n">region</span><span class="p">.</span><span class="n">wait_until_valid</span><span class="p">();</span>
+
+  <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">unmap_region</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">region</span><span class="p">);</span>
+
+  <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">destroy_logical_region</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">lr</span><span class="p">);</span>
+  <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">destroy_field_space</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">fs</span><span class="p">);</span>
+  <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">destroy_index_space</span><span class="p">(</span><span class="n">ctx</span><span class="p">,</span> <span class="n">is</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="kt">int</span> <span class="nf">main</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">set_top_level_task_id</span><span class="p">(</span><span class="n">TOP_LEVEL_TASK_ID</span><span class="p">);</span>
+  <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">register_legion_task</span><span class="o">&lt;</span><span class="n">top_level_task</span><span class="o">&gt;</span><span class="p">(</span><span class="n">TOP_LEVEL_TASK_ID</span><span class="p">,</span>
+      <span class="n">Processor</span><span class="o">::</span><span class="n">LOC_PROC</span><span class="p">,</span> <span class="nb">true</span><span class="p">,</span> <span class="nb">false</span><span class="p">);</span>
+
+  <span class="k">return</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">start</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Notice the line at the beginning of the top-level task that defines the number of elements in the region <code>int num_elements = 1&lt;&lt;15;</code>. The minimum amount of data that Legion should allocate for such a region is <code>8 * 1&lt;&lt;15 == 262144</code> bytes. When we run a Legion application we have the option to control the amount of memory available at different levels, and we will use different configurations to create low memory situations.</p>
+
+<p>First we run in a configuration where there is sufficient memory available within the <code>CPUMemory</code> area by restricting it to 1 MB with the <code>-ll:csize</code> option. The <code>-ll:gsize</code> controls the size of the space available in the <code>GASNetMemory</code>.</p>
+<div class="highlight"><pre><code class="language-bash" data-lang="bash">./example -ll:gsize <span class="m">32</span> -ll:csize 1
+</code></pre></div>
+<p>Since 256K will fit into 1MB, we shouldn&#39;t have any problems. We&#39;ve turned on debugging and selected the relevant parts. What we see here is that a chunk of memory is allocated in <code>mem=60000000</code> and it matches the size we expect:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">[0 - 7f7c88e8e700] {2}{malloc}: alloc partial block: mem=60000000 size=262144 ofs=786432
+[0 - 7f7c88e8e700] {2}{inst}: local instance e0000000 created in memory 60000000 at offset 786432 (redop=0 list_size=-1 parent_inst=0 block_size=32768)
+[0 - 7f7c88e8e700] {2}{meta}: instance created: region=a0000001 memory=60000000 id=e0000000 bytes=262144
+...
+</code></pre></div>
+<p>Later in the trace the task completes and the memory for the region is reclaimed as well:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">...
+[0 - 7f7c88e8e700] {2}{meta}: instance destroyed: space=a0000001 id=e0000000
+[0 - 7f7c88e8e700] {2}{inst}: destroying local instance: mem=60000000 inst=e0000000
+[0 - 7f7c88e8e700] {2}{malloc}: free block: mem=60000000 size=262144 ofs=786432
+</code></pre></div>
+<p>What is this <em>partial block</em> business? In the Legion memory allocator a <code>free_blocks</code> data structure is searched for a chunk of memory large enough for the region being requested. If a block is found that is exactly the right size, then that case is preferred. Otherwise, a block large enough for the requested region will be used and there will be some leftover space, hence the partial allocation message. Nothing really to worry about.</p>
+
+<p>The next case we&#39;ll consider is when the region is too large for <code>CPUMemory</code> which we have restricted to 1MB, but not larger than the 32MB <code>GASNetMemory</code> area. For this we use <code>1&lt;&lt;18</code> elements which corresponds to about 2MB of memory. Again we show the relevant parts of the debugging messages, and in fact, we do see a failure:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">[0 - 7fa3a5316700] {2}{malloc}: alloc FAILED: mem=60000000 size=2097152
+[0 - 7fa3a5316700] {2}{meta}: instance created: region=a0000001 memory=60000000 id=0 bytes=2097152
+...
+</code></pre></div>
+<p>But look, we see a second allocation attempt right after the failure for the exact same size, but in a <em>different</em> memory (<code>mem=607f0000</code>), and this time the allocation is successful.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">...
+[0 - 7fa3a5316700] {2}{malloc}: alloc partial block: mem=607f0000 size=2097152 ofs=31457280
+[0 - 7fa3a5316700] {2}{inst}: local instance e07f0000 created in memory 607f0000 at offset 31457280 (redop=0 list_size=-1 parent_inst=0 block_size=262144)
+[0 - 7fa3a5316700] {2}{meta}: instance created: region=a0000001 memory=607f0000 id=e07f0000 bytes=2097152
+</code></pre></div>
+<p>Later when the memory is freed it references the same memory that the successful allocation had occurred from earlier:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">...
+[0 - 7fa3a5316700] {2}{meta}: instance destroyed: space=a0000001 id=e07f0000
+[0 - 7fa3a5316700] {2}{inst}: destroying local instance: mem=607f0000 inst=e07f0000
+[0 - 7fa3a5316700] {2}{malloc}: free block: mem=607f0000 size=2097152 ofs=31457280
+</code></pre></div>
+<p>Now, what happens if we try to map a region that is larger than the 32MB <code>GASNetMemory</code>? We&#39;ll increase the size of the region to be <code>1&lt;&lt;23</code> elements, which is ends up being a 64 MB region.</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">[0 - 7f3d82e7d700] {2}{malloc}: alloc FAILED: mem=60000000 size=67108864
+[0 - 7f3d82e7d700] {2}{meta}: instance created: region=a0000001 memory=60000000 id=0 bytes=67108864
+...
+</code></pre></div>
+<p>Here we fail again in the first memory. But what is different is that now we fail in the next attempt in the second memory as well:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">...
+[0 - 7f3d82e7d700] {2}{malloc}: alloc FAILED: mem=607f0000 size=67108864
+[0 - 7f3d82e7d700] {2}{meta}: instance created: region=a0000001 memory=607f0000 id=0 bytes=67108864
+...
+</code></pre></div>
+<p>Don&#39;t fear, Legion will retry:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">...
+[0 - 7f3d82e7d700] {4}{default_mapper}: Notify failed mapping for operation ID 3 in default mapper for processor 80000001! Retrying...
+[0 - 7f3d82e7d700] {2}{malloc}: alloc FAILED: mem=60000000 size=67108864
+[0 - 7f3d82e7d700] {2}{meta}: instance created: region=a0000001 memory=60000000 id=0 bytes=67108864
+[0 - 7f3d82e7d700] {2}{malloc}: alloc FAILED: mem=607f0000 size=67108864
+[0 - 7f3d82e7d700] {2}{meta}: instance created: region=a0000001 memory=607f0000 id=0 bytes=67108864
+[0 - 7f3d82e7d700] {4}{default_mapper}: Notify failed mapping for operation ID 3 in default mapper for processor 80000001! Retrying...
+</code></pre></div>
+<p>And will keep trying... But eventually it will give up, with a sort of helpful message:</p>
+<div class="highlight"><pre><code class="language-text" data-lang="text">[0 - 7f3d82e7d700] {5}{default_mapper}: Reached maximum number of failed mappings for operation ID 3 in default mapper for processor 80000001!  Try implementing a custom mapper or changing the size of the memories in the low-level runtime. Failing out ...
+</code></pre></div>
+<h2>Code Walk</h2>
+
+<p>How does this work? I mean, how do we get from <code>map_region</code> to the out-of-memory situation? I&#39;m no Legion expert, but I&#39;ve been studying it quite a bit. I&#39;ll provide the general path here, but there is a <em>lot</em> of details I am skipping over.</p>
+
+<p>The first step in our journey is  <code>MapOp::trigger_execution</code> which is the execution stage of the pipeline for mapping operations (the magic sauce for inline mappings). How did we get here? That&#39;s another story, but just realize that an inline mapping is realized through the execution of a mapping operation. Since a mapping operation is effectively deciding what memory some data should be put it, it first consults the relevant installed mapper through the runtime:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">notify</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">invoke_mapper_map_inline</span><span class="p">(</span><span class="n">local_proc</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+</code></pre></div>
+<p>The <code>map_inline</code> callback of a mapper invoked as a result (in this case we consider the default mapper). The <code>map_inline</code> call is responsible for a number of things, but we consider here its role in providing a preference for what memories to use for the mapping operation. In <code>map_inline</code> we make a call to <code>find_memory_stack</code> of the associated machine. This little thing looks for the memories that are that are visible to a particular processor, and might sort them according to a metric such as latency.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">find_memory_stack</span><span class="p">(</span><span class="n">Processor</span> <span class="n">proc</span><span class="p">,</span>
+    <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">stack</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">latency</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Processor</span><span class="p">,</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;</span> <span class="o">&gt;::</span><span class="n">iterator</span> <span class="n">finder</span> <span class="o">=</span> <span class="n">proc_mem_stacks</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">proc</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">finder</span> <span class="o">!=</span> <span class="n">proc_mem_stacks</span><span class="p">.</span><span class="n">end</span><span class="p">())</span> <span class="p">{</span>
+    <span class="n">stack</span> <span class="o">=</span> <span class="n">finder</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">latency</span><span class="p">)</span>
+      <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">sort_memories</span><span class="p">(</span><span class="n">machine</span><span class="p">,</span> <span class="n">proc</span><span class="p">,</span> <span class="n">stack</span><span class="p">,</span> <span class="n">latency</span><span class="p">);</span>
+    <span class="k">return</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">find_memory_stack</span><span class="p">(</span><span class="n">machine</span><span class="p">,</span> <span class="n">proc</span><span class="p">,</span> <span class="n">stack</span><span class="p">,</span> <span class="n">latency</span><span class="p">);</span> 
+  <span class="n">proc_mem_stacks</span><span class="p">[</span><span class="n">proc</span><span class="p">]</span> <span class="o">=</span> <span class="n">stack</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">latency</span><span class="p">)</span>
+    <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">sort_memories</span><span class="p">(</span><span class="n">machine</span><span class="p">,</span> <span class="n">proc</span><span class="p">,</span> <span class="n">proc_mem_stacks</span><span class="p">[</span><span class="n">proc</span><span class="p">],</span> <span class="n">latency</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>So, in the case that the stack for the processor isn&#39;t found, we just grab the visible memories:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">find_memory_stack</span><span class="p">(</span><span class="n">Machine</span> <span class="o">*</span><span class="n">machine</span><span class="p">,</span> 
+    <span class="n">Processor</span> <span class="n">proc</span><span class="p">,</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">stack</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">latency</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">visible</span> <span class="o">=</span> <span class="n">machine</span><span class="o">-&gt;</span><span class="n">get_visible_memories</span><span class="p">(</span><span class="n">proc</span><span class="p">);</span>
+  <span class="n">stack</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">stack</span><span class="p">.</span><span class="n">end</span><span class="p">(),</span><span class="n">visible</span><span class="p">.</span><span class="n">begin</span><span class="p">(),</span><span class="n">visible</span><span class="p">.</span><span class="n">end</span><span class="p">());</span>
+  <span class="n">MachineQueryInterface</span><span class="o">::</span><span class="n">sort_memories</span><span class="p">(</span><span class="n">machine</span><span class="p">,</span> <span class="n">proc</span><span class="p">,</span> <span class="n">stack</span><span class="p">,</span> <span class="n">latency</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Now back in <code>MapOp::trigger_execution</code> we have a set of memories in some order of preference. Next we do two things. First we call <code>runtime-&gt;forest-&gt;map_physical_region</code> which gives us a <code>MappingRef</code>. The documentation says this about <code>MappingRef</code>:</p>
+
+<blockquote>
+<p>This class keeps a valid reference to a physical instance that has
+been allocated and is ready to have dependence analysis performed.
+Once all the allocations have been performed, then an operation
+can pass all of the mapping references to the RegionTreeForest
+to actually perform the operations necessary to make the 
+region valid and return an InstanceRef.</p>
+</blockquote>
+
+<p>So, based on what I&#39;ve seen, <code>map_phsyical_region</code> grabs all the necessary resources (like memory) for the region. Later <code>register_physical_region</code> is called and that actually does stuff like moves data around and makes it usable. Anyway... how do we get to those failed memory allocations? We&#39;ll hit the out-of-memory error before making it to <code>register_physical_region</code>, so we restart this journey in <code>map_physical_region</code>.</p>
+
+<p>This thing called a region tree is important in Legion. It&#39;s a tree. There is a logical tree and a physical tree. I think the physical tree tracks where data is, but I&#39;m still not completely familiar with it. But, we can traverse it. To do that, we use a <code>MappingTraverser</code>, which is a subclass of <code>PathTraverser</code>, and it uses the visitor pattern to implement callbacks for visiting a region and visiting a partition. Here we visit a region:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">MappingTraverser</span><span class="o">::</span><span class="n">visit_region</span><span class="p">(</span><span class="n">RegionNode</span> <span class="o">*</span><span class="n">node</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">has_child</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="c1">// Now we&#39;re ready to map this instance</span>
+    <span class="c1">// Separate paths for reductions and non-reductions</span>
+    <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">IS_REDUCE</span><span class="p">(</span><span class="n">info</span><span class="o">-&gt;</span><span class="n">req</span><span class="p">))</span>
+    <span class="p">{</span>
+      <span class="c1">// See if we can get or make a physical instance</span>
+      <span class="c1">// that we can use</span>
+      <span class="k">return</span> <span class="n">map_physical_region</span><span class="p">(</span><span class="n">node</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="c1">// See if we can make or use an existing reduction instance</span>
+      <span class="k">return</span> <span class="n">map_reduction_region</span><span class="p">(</span><span class="n">node</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="c1">// Still not there yet, traverse the node</span>
+    <span class="n">traverse_node</span><span class="p">(</span><span class="n">node</span><span class="p">);</span>
+    <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+  <span class="p">}</span> 
+<span class="p">}</span>
+</code></pre></div>
+<p>We are interested in the case where we are mapping a region without reduce privileges. So we call <code>map_physical_region</code> on the node. What is the first thing we do in <code>map_physical_region</code>? The first thing is to get a reference to the memory preferences that the mapper specified:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">chosen_order</span> <span class="o">=</span> <span class="n">info</span><span class="o">-&gt;</span><span class="n">req</span><span class="p">.</span><span class="n">target_ranking</span><span class="p">;</span>
+</code></pre></div>
+<p>That&#39;s encouraging. There is a bunch of stuff that goes on in here, but it&#39;s primarily just a giant for loop that examines each memory specified by the mapper and performs filtering, among other things:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="c1">// Go through each of the memories provided by the mapper</span>
+<span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">Memory</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">mit</span> <span class="o">=</span> <span class="n">chosen_order</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+    <span class="n">mit</span> <span class="o">!=</span> <span class="n">chosen_order</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">mit</span><span class="o">++</span><span class="p">)</span>
+<span class="p">{</span>
+</code></pre></div>
+<p>This is a large a complicated thing, but at the bottom of that for loop we have:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">chosen_inst</span> <span class="o">=</span> <span class="n">node</span><span class="o">-&gt;</span><span class="n">create_instance</span><span class="p">(</span><span class="o">*</span><span class="n">mit</span><span class="p">,</span> <span class="n">new_fields</span><span class="p">,</span> 
+    <span class="n">blocking_factor</span><span class="p">,</span> <span class="n">info</span><span class="o">-&gt;</span><span class="n">mappable</span><span class="o">-&gt;</span><span class="n">get_depth</span><span class="p">());</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">chosen_inst</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// We successfully made an instance</span>
+  <span class="n">needed_fields</span> <span class="o">=</span> <span class="n">user_mask</span><span class="p">;</span>
+  <span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>So we try to create some sort of an instance in a memory, and if successful we break out of the for loop. Now we go down a bit of deep hierarchy. Above, <code>node</code> is type <code>RegionNode</code> and the relevant method is <code>RegionNode::create_instance</code> that turns around and calls <code>create_instance</code> on a <code>FieldSpaceNode</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">MaterializedView</span><span class="o">*</span> <span class="n">RegionNode</span><span class="o">::</span><span class="n">create_instance</span><span class="p">(</span><span class="n">Memory</span> <span class="n">target_mem</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">fields</span><span class="p">,</span>
+    <span class="kt">size_t</span> <span class="n">blocking_factor</span><span class="p">,</span>
+    <span class="kt">unsigned</span> <span class="n">depth</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">InstanceManager</span> <span class="o">*</span><span class="n">manager</span> <span class="o">=</span> <span class="n">column_source</span><span class="o">-&gt;</span><span class="n">create_instance</span><span class="p">(</span><span class="n">target_mem</span><span class="p">,</span>
+      <span class="n">row_source</span><span class="o">-&gt;</span><span class="n">domain</span><span class="p">,</span>
+      <span class="n">fields</span><span class="p">,</span>
+      <span class="n">blocking_factor</span><span class="p">,</span> 
+      <span class="n">depth</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>And here we arrive at <code>FieldSpaceNode::create_instance</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">InstanceManager</span><span class="o">*</span> <span class="n">FieldSpaceNode</span><span class="o">::</span><span class="n">create_instance</span><span class="p">(</span><span class="n">Memory</span> <span class="n">location</span><span class="p">,</span>
+    <span class="n">Domain</span> <span class="n">domain</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">FieldID</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">create_fields</span><span class="p">,</span>
+    <span class="kt">size_t</span> <span class="n">blocking_factor</span><span class="p">,</span>
+    <span class="kt">unsigned</span> <span class="n">depth</span><span class="p">,</span>
+    <span class="n">RegionNode</span> <span class="o">*</span><span class="n">node</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">...</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">inst</span><span class="p">.</span><span class="n">exists</span><span class="p">())</span>
+    <span class="n">inst</span> <span class="o">=</span> <span class="n">domain</span><span class="p">.</span><span class="n">create_instance</span><span class="p">(</span><span class="n">location</span><span class="p">,</span> <span class="n">field_sizes</span><span class="p">,</span> <span class="n">blocking_factor</span><span class="p">);</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>Again, this routine does a bunch of stuff, but eventually ends up (in some cases) calling <code>Domain::create_instance</code>. This puts us down into the low-level parts of Legion, where we will actually deal with some memory objects:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">RegionInstance</span> <span class="n">Domain</span><span class="o">::</span><span class="n">create_instance</span><span class="p">(</span><span class="n">Memory</span> <span class="n">memory</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="kt">size_t</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">field_sizes</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">block_size</span><span class="p">,</span>
+    <span class="n">ReductionOpID</span> <span class="n">redop_id</span><span class="p">)</span> <span class="k">const</span>
+<span class="p">{</span>
+</code></pre></div>
+<p>Based on the shape of the region and the size of fields various parameters are computed and we ask the memory instance to create for us a new region instance:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">RegionInstance</span> <span class="n">i</span> <span class="o">=</span> <span class="n">m_impl</span><span class="o">-&gt;</span><span class="n">create_instance</span><span class="p">(</span><span class="n">get_index_space</span><span class="p">(),</span>
+    <span class="n">linearization_bits</span><span class="p">,</span> <span class="n">inst_bytes</span><span class="p">,</span> <span class="n">block_size</span><span class="p">,</span> <span class="n">elem_size</span><span class="p">,</span>
+    <span class="n">field_sizes</span><span class="p">,</span> <span class="n">redop_id</span><span class="p">,</span> <span class="o">-</span><span class="mi">1</span> <span class="cm">/*list size*/</span><span class="p">,</span> <span class="n">RegionInstance</span><span class="o">::</span><span class="n">NO_INST</span><span class="p">);</span>
+</code></pre></div>
+<p>This is where we will end our code walk for now. The target memory (e.g. GASNet or local CPU/heap) tries to allocate enough memory for the instance. If it fails it will return <code>RegionInstance::NO_INST</code> to indicate failure.</p>
+
+<p>Now we can unwind the stack all the way back to <code>map_physical_region</code> where we tried to create the instance. If we failed, we&#39;ll try the next valid memory in that big for loop:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">chosen_inst</span> <span class="o">=</span> <span class="n">node</span><span class="o">-&gt;</span><span class="n">create_instance</span><span class="p">(</span><span class="o">*</span><span class="n">mit</span><span class="p">,</span> <span class="n">new_fields</span><span class="p">,</span> 
+    <span class="n">blocking_factor</span><span class="p">,</span> <span class="n">info</span><span class="o">-&gt;</span><span class="n">mappable</span><span class="o">-&gt;</span><span class="n">get_depth</span><span class="p">());</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">chosen_inst</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// We successfully made an instance</span>
+  <span class="n">needed_fields</span> <span class="o">=</span> <span class="n">user_mask</span><span class="p">;</span>
+  <span class="k">break</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>From here, <code>map_region</code> will finish mapping region for the task if the memory allocation succeeded. That is for another post.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

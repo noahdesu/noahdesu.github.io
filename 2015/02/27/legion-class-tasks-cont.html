@@ -1,0 +1,504 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #10: Task Registration and Execution</title>
+  <meta name="description" content="Overview">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/02/27/legion-class-tasks-cont.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #10: Task Registration and Execution</h1>
+    <p class="post-meta">Feb 27, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>Overview</h1>
+
+<p>Last time we saw how tasks are launched, and today we&#39;ll look at how tasks are
+registered because the high-level runtime wraps application-level tasks. Rather
+than interacting directly with application-level tasks Legion intercepts them
+to provide setup and tear down functionality.</p>
+
+<h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/-mZpaZo_FGU" frameborder="0" allowfullscreen></iframe>
+
+<h1>Task Registration</h1>
+
+<p>Here is a typical task registration call. There are many different types based on different characteristics of the task being registered:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span> <span class="n">T</span><span class="p">,</span>
+  <span class="n">T</span> <span class="p">(</span><span class="o">*</span><span class="n">TASK_PTR</span><span class="p">)(</span><span class="k">const</span> <span class="n">Task</span><span class="o">*</span><span class="p">,</span> <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;&amp;</span><span class="p">,</span>
+      <span class="n">Context</span><span class="p">,</span> <span class="n">HighLevelRuntime</span><span class="o">*</span><span class="p">)</span><span class="o">&gt;</span>
+<span class="cm">/*static*/</span> <span class="n">TaskID</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">register_legion_task</span><span class="p">(</span><span class="n">TaskID</span> <span class="n">id</span><span class="p">,</span>
+    <span class="n">Processor</span><span class="o">::</span><span class="n">Kind</span> <span class="n">proc_kind</span><span class="p">,</span>
+    <span class="kt">bool</span> <span class="n">single</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">index</span><span class="p">,</span>
+    <span class="n">VariantID</span> <span class="n">vid</span><span class="p">,</span>
+    <span class="n">TaskConfigOptions</span> <span class="n">options</span><span class="p">,</span>
+    <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">task_name</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">task_name</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="c1">// Has no name, so just call it by its number</span>
+    <span class="kt">char</span> <span class="o">*</span><span class="n">buffer</span> <span class="o">=</span> <span class="p">(</span><span class="kt">char</span><span class="o">*</span><span class="p">)</span><span class="n">malloc</span><span class="p">(</span><span class="mi">32</span><span class="o">*</span><span class="k">sizeof</span><span class="p">(</span><span class="kt">char</span><span class="p">));</span>
+    <span class="n">sprintf</span><span class="p">(</span><span class="n">buffer</span><span class="p">,</span><span class="s">&quot;%d&quot;</span><span class="p">,</span><span class="n">id</span><span class="p">);</span>
+    <span class="n">task_name</span> <span class="o">=</span> <span class="n">buffer</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">update_collection_table</span><span class="p">(</span>
+      <span class="n">LegionTaskWrapper</span><span class="o">::</span><span class="n">legion_task_wrapper</span><span class="o">&lt;</span><span class="n">T</span><span class="p">,</span><span class="n">TASK_PTR</span><span class="o">&gt;</span><span class="p">,</span> 
+      <span class="n">LegionTaskWrapper</span><span class="o">::</span><span class="n">inline_task_wrapper</span><span class="o">&lt;</span><span class="n">T</span><span class="p">,</span><span class="n">TASK_PTR</span><span class="o">&gt;</span><span class="p">,</span> <span class="n">id</span><span class="p">,</span> <span class="n">proc_kind</span><span class="p">,</span> 
+      <span class="n">single</span><span class="p">,</span> <span class="n">index</span><span class="p">,</span> <span class="n">vid</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">T</span><span class="p">),</span> <span class="n">options</span><span class="p">,</span> <span class="n">task_name</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The important thing to notice here is <code>LegionTaskWrapper::legion_task_wrapper</code> which wraps the function pointer provided by the application. The two important things that the wrapper does is (1) provides setup and clean-up routines, and (2) converts between the low-level runtime task interface to the high-level interface that applications expect.</p>
+
+<p>All low-level tasks expect three arguments (argument blob, argument size, and the processor they are running on). Here is how the wrapper works. First there are static assertions that check some properties on the task:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">template</span><span class="o">&lt;</span><span class="k">typename</span> <span class="n">T</span><span class="p">,</span>
+  <span class="n">T</span> <span class="p">(</span><span class="o">*</span><span class="n">TASK_PTR</span><span class="p">)(</span><span class="k">const</span> <span class="n">Task</span><span class="o">*</span><span class="p">,</span> <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;&amp;</span><span class="p">,</span>
+      <span class="n">Context</span><span class="p">,</span> <span class="n">HighLevelRuntime</span><span class="o">*</span><span class="p">)</span><span class="o">&gt;</span>
+<span class="kt">void</span> <span class="n">LegionTaskWrapper</span><span class="o">::</span><span class="n">legion_task_wrapper</span><span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> 
+    <span class="kt">size_t</span> <span class="n">arglen</span><span class="p">,</span> <span class="n">Processor</span> <span class="n">p</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Assert that we are returning Futures or FutureMaps</span>
+  <span class="n">LEGION_STATIC_ASSERT</span><span class="p">((</span><span class="n">LegionTypeInequality</span><span class="o">&lt;</span><span class="n">T</span><span class="p">,</span><span class="n">Future</span><span class="o">&gt;::</span><span class="n">value</span><span class="p">));</span>
+  <span class="n">LEGION_STATIC_ASSERT</span><span class="p">((</span><span class="n">LegionTypeInequality</span><span class="o">&lt;</span><span class="n">T</span><span class="p">,</span><span class="n">FutureMap</span><span class="o">&gt;::</span><span class="n">value</span><span class="p">));</span>
+  <span class="c1">// Assert that the return type size is within the required size</span>
+  <span class="n">LEGION_STATIC_ASSERT</span><span class="p">(</span><span class="k">sizeof</span><span class="p">(</span><span class="n">T</span><span class="p">)</span> <span class="o">&lt;=</span> <span class="n">MAX_RETURN_SIZE</span><span class="p">);</span>
+
+<span class="p">...</span>
+</code></pre></div>
+<p>Next the runtime is retrieved from the processor parameter provided by the low-level runtime. Recall that the <code>Context</code> object is really just a <code>Task*</code>. When the task was launched the context was stuffed into the arguments. Here we are now, so we cast the argument back to the task, and ask the runtime to being the task which also returns the physical regions specified by the region requirements for the task.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Get the high level runtime</span>
+  <span class="n">HighLevelRuntime</span> <span class="o">*</span><span class="n">runtime</span> <span class="o">=</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">get_runtime</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+
+  <span class="c1">// Read the context out of the buffer</span>
+  <span class="n">Context</span> <span class="n">ctx</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="k">const</span> <span class="n">Context</span><span class="o">*</span><span class="p">)</span><span class="n">args</span><span class="p">);</span>
+
+  <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;</span> <span class="o">&amp;</span><span class="n">regions</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">begin_task</span><span class="p">(</span><span class="n">ctx</span><span class="p">);</span>
+
+<span class="p">...</span>
+</code></pre></div>
+<p>Finally we call the application-level function and record the return value, and serialize the return value via the <code>end_task</code> call.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Invoke the task with the given context</span>
+  <span class="n">T</span> <span class="n">return_value</span> <span class="o">=</span> 
+     <span class="p">(</span><span class="o">*</span><span class="n">TASK_PTR</span><span class="p">)(</span><span class="k">reinterpret_cast</span><span class="o">&lt;</span><span class="n">Task</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">ctx</span><span class="p">),</span><span class="n">regions</span><span class="p">,</span><span class="n">ctx</span><span class="p">,</span><span class="n">runtime</span><span class="p">);</span>
+
+  <span class="c1">// Send the return value back</span>
+  <span class="n">LegionSerialization</span><span class="o">::</span><span class="n">end_task</span><span class="o">&lt;</span><span class="n">T</span><span class="o">&gt;</span><span class="p">(</span><span class="n">runtime</span><span class="p">,</span> <span class="n">ctx</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">return_value</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<h1>Task Execution</h1>
+
+<p>Before proceeding take a look at <code>SingleTask::launch_task</code> to see how the context is set as the arguments. Here <code>proxy_this</code> is pointing to a <code>Task*</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="n">Event</span> <span class="n">task_launch_event</span> <span class="o">=</span> <span class="n">launch_processor</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">low_id</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">proxy_this</span><span class="p">,</span>
+             <span class="k">sizeof</span><span class="p">(</span><span class="n">proxy_this</span><span class="p">),</span> <span class="n">start_condition</span><span class="p">,</span> <span class="n">task_priority</span><span class="p">);</span>
+</code></pre></div>
+<p>The <code>begin_task</code> and <code>end_task</code> routines on the runtime forward the call to the tasks:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;&amp;</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">begin_task</span><span class="p">(</span><span class="n">SingleTask</span> <span class="o">*</span><span class="n">ctx</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">return</span> <span class="n">ctx</span><span class="o">-&gt;</span><span class="n">begin_task</span><span class="p">();</span>
+<span class="p">}</span>
+
+<span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">end_task</span><span class="p">(</span><span class="n">SingleTask</span> <span class="o">*</span><span class="n">ctx</span><span class="p">,</span> <span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">result</span><span class="p">,</span> 
+    <span class="kt">size_t</span> <span class="n">result_size</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">owned</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">ctx</span><span class="o">-&gt;</span><span class="n">end_task</span><span class="p">(</span><span class="n">result</span><span class="p">,</span> <span class="n">result_size</span><span class="p">,</span> <span class="n">owned</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Mappers may request that tasks run on a processor from a set of candidate processors (rather than a specific processor), so the first thing that happens is we figure out exactly which processor it is that we are running on now.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">vector</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;&amp;</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">begin_task</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Switch over the executing processor to the one</span>
+  <span class="c1">// that has actually been assigned to run this task.</span>
+  <span class="n">executing_processor</span> <span class="o">=</span> <span class="n">Processor</span><span class="o">::</span><span class="n">get_executing_processor</span><span class="p">();</span>
+</code></pre></div>
+<p>Recall that we discussed previously that processor managers track the set of contexts that have mapped but haven&#39;t yet started running. Here we decrement the pending counts to update this state. This allows the runtime to manage how far ahead the program runs.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Decrement the number of pending tasks on the processor which</span>
+  <span class="c1">// we originally mapped this task</span>
+  <span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">decrement_pending</span><span class="p">();</span>
+</code></pre></div>
+<p>Finally we record the start time which will later be used to compute the amount of time the application function required to run:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Start the profiling if requested</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">profile_task</span><span class="p">)</span>
+    <span class="k">this</span><span class="o">-&gt;</span><span class="n">start_time</span> <span class="o">=</span> <span class="p">(</span><span class="n">TimeStamp</span><span class="o">::</span><span class="n">get_current_time_in_micros</span><span class="p">()</span> <span class="o">-</span> 
+        <span class="n">Runtime</span><span class="o">::</span><span class="n">init_time</span><span class="p">);</span>
+
+  <span class="k">return</span> <span class="n">physical_regions</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Ok that was straightforward. What about shutting down a task? First up we calculate the runtime and let the mapper know.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">end_task</span><span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">res</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">res_size</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">owned</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">profile_task</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">this</span><span class="o">-&gt;</span><span class="n">stop_time</span> <span class="o">=</span> <span class="p">(</span><span class="n">TimeStamp</span><span class="o">::</span><span class="n">get_current_time_in_micros</span><span class="p">()</span> <span class="o">-</span>
+        <span class="n">Runtime</span><span class="o">::</span><span class="n">init_time</span><span class="p">);</span>
+    <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">invoke_mapper_notify_profiling</span><span class="p">(</span><span class="n">executing_processor</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>Now we clean-up. This includes any physical regions that the task was using (unless they were unmapped explicitly by the task):</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// unmap all of the physical regions which are still mapped</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">regions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">physical_regions</span><span class="p">[</span><span class="n">idx</span><span class="p">].</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">is_mapped</span><span class="p">())</span>
+      <span class="n">physical_regions</span><span class="p">[</span><span class="n">idx</span><span class="p">].</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">unmap_region</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="c1">// now we can clear the physical regions since we&#39;re done using them</span>
+  <span class="n">physical_regions</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+</code></pre></div>
+<p>Then we take care of any inline mappings that the task created:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Do the same thing with any residual inline mapped regions</span>
+  <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">list</span><span class="o">&lt;</span><span class="n">PhysicalRegion</span><span class="o">&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+      <span class="n">inline_regions</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">inline_regions</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">is_mapped</span><span class="p">())</span>
+      <span class="n">it</span><span class="o">-&gt;</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">unmap_region</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="n">inline_regions</span><span class="p">.</span><span class="n">clear</span><span class="p">();</span>
+</code></pre></div>
+<p>Now it gets more complicated. Parent tasks expect data mutated by children to be visible. So a series of close operations on the physical region will be issued which take care of this stuff. This is more complicated stuff that I can&#39;t explain well. See the video of Legion thesis for more information for what is means for these regions to be closed.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">is_leaf</span><span class="p">()</span> <span class="o">||</span> <span class="p">(</span><span class="n">num_virtual_mappings</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">))</span>
+  <span class="p">{</span>
+    <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">local_instances</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">virtual_mapped</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">region_deleted</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span>
+          <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">IS_READ_ONLY</span><span class="p">(</span><span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">])</span> <span class="o">&amp;&amp;</span>
+          <span class="o">!</span><span class="n">IS_NO_ACCESS</span><span class="p">(</span><span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">]))</span>
+      <span class="p">{</span>
+        <span class="n">CloseOp</span> <span class="o">*</span><span class="n">close_op</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">get_available_close_op</span><span class="p">();</span>    
+        <span class="n">close_op</span><span class="o">-&gt;</span><span class="n">initialize</span><span class="p">(</span><span class="k">this</span><span class="p">,</span> <span class="n">idx</span><span class="p">,</span> <span class="n">local_instances</span><span class="p">[</span><span class="n">idx</span><span class="p">]);</span>
+        <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">add_to_dependence_queue</span><span class="p">(</span><span class="n">executing_processor</span><span class="p">,</span> <span class="n">close_op</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>Next up the return value from the application function is handled. The <code>handle_future</code> method is virtual on the task operation class. We&#39;ll look at it for <code>IndividualTask</code>, but defer its behavior for point tasks.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Handle the future result</span>
+  <span class="n">handle_future</span><span class="p">(</span><span class="n">res</span><span class="p">,</span> <span class="n">res_size</span><span class="p">,</span> <span class="n">owned</span><span class="p">);</span> 
+</code></pre></div>
+<p>The result is treated differently if the task is running remotely or locally.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">IndividualTask</span><span class="o">::</span><span class="n">handle_future</span><span class="p">(</span><span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">res</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">res_size</span><span class="p">,</span>
+    <span class="kt">bool</span> <span class="n">owned</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Save our future value so we can set it or send it back later</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">is_remote</span><span class="p">())</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">owned</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">future_store</span> <span class="o">=</span> <span class="k">const_cast</span><span class="o">&lt;</span><span class="kt">void</span><span class="o">*&gt;</span><span class="p">(</span><span class="n">res</span><span class="p">);</span>
+      <span class="n">future_size</span> <span class="o">=</span> <span class="n">res_size</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="n">future_size</span> <span class="o">=</span> <span class="n">res_size</span><span class="p">;</span>
+      <span class="n">future_store</span> <span class="o">=</span> <span class="n">legion_malloc</span><span class="p">(</span><span class="n">FUTURE_RESULT_ALLOC</span><span class="p">,</span> <span class="n">future_size</span><span class="p">);</span>
+      <span class="n">memcpy</span><span class="p">(</span><span class="n">future_store</span><span class="p">,</span><span class="n">res</span><span class="p">,</span><span class="n">future_size</span><span class="p">);</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+  <span class="p">{</span>
+    <span class="c1">// Set our future, but don&#39;t trigger it yet</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">must_epoch</span> <span class="o">==</span> <span class="nb">NULL</span><span class="p">)</span>
+      <span class="n">result</span><span class="p">.</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">set_result</span><span class="p">(</span><span class="n">res</span><span class="p">,</span> <span class="n">res_size</span><span class="p">,</span> <span class="n">owned</span><span class="p">);</span>
+    <span class="k">else</span>
+      <span class="n">must_epoch</span><span class="o">-&gt;</span><span class="n">set_future</span><span class="p">(</span><span class="n">index_point</span><span class="p">,</span> <span class="n">res</span><span class="p">,</span> <span class="n">res_size</span><span class="p">,</span> <span class="n">owned</span><span class="p">);</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Returning back to <code>end_task</code>, the final thing is to deal with some expensive clean-up work. Since we are running on a processor dedicated to application-level work we&#39;ll offload it onto a utility processor if possible. The heavy work is inside <code>post_end_work</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="cp">#ifdef SPECIALIZED_UTIL_PROCS</span>
+  <span class="n">Processor</span> <span class="n">util</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">get_cleanup_proc</span><span class="p">(</span><span class="n">executing_processor</span><span class="p">);</span>
+<span class="cp">#else</span>
+  <span class="n">Processor</span> <span class="n">util</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">find_utility_group</span><span class="p">();</span>
+<span class="cp">#endif</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">util</span> <span class="o">!=</span> <span class="n">executing_processor</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">PostEndArgs</span> <span class="n">post_end_args</span><span class="p">;</span>
+    <span class="n">post_end_args</span><span class="p">.</span><span class="n">hlr_id</span> <span class="o">=</span> <span class="n">HLR_POST_END_ID</span><span class="p">;</span>
+    <span class="n">post_end_args</span><span class="p">.</span><span class="n">proxy_this</span> <span class="o">=</span> <span class="k">this</span><span class="p">;</span>
+    <span class="n">util</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">HLR_TASK_ID</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">post_end_args</span><span class="p">,</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">post_end_args</span><span class="p">));</span>
+  <span class="p">}</span>
+  <span class="k">else</span>
+    <span class="n">post_end_task</span><span class="p">();</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Since tasks are operations we have to update their progress through the execution pipeline. First thing <code>complete_execution</code> marks this stage complete. Usually this is enough for operations, but tasks have more stages. Task operations also have the complete and committed stages. However, for a task to be complete and committed its children also have to be complete and committed.</p>
+
+<p>We won&#39;t go into detail about all the logic here that handles these cases, but we&#39;ll follow how the metadata is updated next.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">post_end_task</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Mark that we are done executing this operation</span>
+  <span class="n">complete_execution</span><span class="p">();</span>
+
+  <span class="c1">// Mark that we are done executing and then see if we need to</span>
+  <span class="c1">// trigger any of our mapping, completion, or commit methods</span>
+  <span class="kt">bool</span> <span class="n">need_complete</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="kt">bool</span> <span class="n">need_commit</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+
+  <span class="c1">// If we&#39;re a leaf with no virtual mappings then</span>
+  <span class="c1">// there are guaranteed to be no children</span>
+  <span class="p">{</span>
+    <span class="n">AutoLock</span> <span class="n">o_lock</span><span class="p">(</span><span class="n">op_lock</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">executing_children</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span> <span class="o">&amp;&amp;</span> <span class="n">executed_children</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+    <span class="p">{</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">children_complete_invoked</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">need_complete</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+        <span class="n">children_complete_invoked</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">complete_children</span><span class="p">.</span><span class="n">empty</span><span class="p">()</span> <span class="o">&amp;&amp;</span> 
+          <span class="o">!</span><span class="n">children_commit_invoked</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">need_commit</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+        <span class="n">children_commit_invoked</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+  <span class="p">}</span> 
+
+  <span class="k">if</span> <span class="p">(</span><span class="n">need_complete</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="c1">// If we had any virtual mappings, mark that we are</span>
+    <span class="c1">// now mapping complete since all children are mapped</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">num_virtual_mappings</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span>
+      <span class="n">complete_mapping</span><span class="p">();</span>
+    <span class="n">trigger_children_complete</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">need_commit</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">trigger_children_committed</span><span class="p">();</span>
+  <span class="p">}</span> 
+<span class="p">}</span>
+</code></pre></div>
+<p>Here are the state variables that track children. Executing children are still in-flight. Executed children have finished execution, but they haven&#39;t completed (e.g. children have children that haven&#39;t completed). Finally completed children have completed but not yet committed.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="k">protected</span><span class="o">:</span>
+  <span class="c1">// Track whether this task has finished executing</span>
+  <span class="n">LegionSet</span><span class="o">&lt;</span><span class="n">Operation</span><span class="o">*</span><span class="p">,</span><span class="n">EXECUTING_CHILD_ALLOC</span><span class="o">&gt;::</span><span class="n">tracked</span> <span class="n">executing_children</span><span class="p">;</span>
+  <span class="n">LegionSet</span><span class="o">&lt;</span><span class="n">Operation</span><span class="o">*</span><span class="p">,</span><span class="n">EXECUTED_CHILD_ALLOC</span><span class="o">&gt;::</span><span class="n">tracked</span> <span class="n">executed_children</span><span class="p">;</span>
+  <span class="n">LegionSet</span><span class="o">&lt;</span><span class="n">Operation</span><span class="o">*</span><span class="p">,</span><span class="n">COMPLETE_CHILD_ALLOC</span><span class="o">&gt;::</span><span class="n">tracked</span> <span class="n">complete_children</span><span class="p">;</span>
+</code></pre></div>
+<p>The transition of tasks between these states occurs via a few methods on the task object. A task is first in the executing state:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">register_child_operation</span><span class="p">(</span><span class="n">Operation</span> <span class="o">*</span><span class="n">op</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">...</span>
+  <span class="n">executing_children</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">op</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>Then it will move to the list of children that have finished execution:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">register_child_executed</span><span class="p">(</span><span class="n">Operation</span> <span class="o">*</span><span class="n">op</span><span class="p">)</span>
+<span class="p">{</span>
+<span class="p">...</span>
+      <span class="n">executing_children</span><span class="p">.</span><span class="n">erase</span><span class="p">(</span><span class="n">finder</span><span class="p">);</span>
+      <span class="c1">// Now put it in the list of executing operations</span>
+      <span class="c1">// Note this doesn&#39;t change the number of active children</span>
+      <span class="c1">// so there&#39;s no need to trigger any window waits</span>
+      <span class="c1">//</span>
+      <span class="c1">// Add some hysteresis here so that we have some runway for when</span>
+      <span class="c1">// the paused task resumes it can run for a little while.</span>
+      <span class="n">executed_children</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">op</span><span class="p">);</span>
+<span class="p">...</span>
+<span class="p">}</span>
+
+<span class="n">And</span> <span class="n">so</span> <span class="n">forth</span><span class="p">.</span> <span class="n">A</span> <span class="n">task</span> <span class="n">is</span> <span class="n">first</span> <span class="n">added</span> <span class="n">to</span> <span class="n">these</span> <span class="n">structures</span> <span class="n">when</span> <span class="n">its</span> <span class="nl">created</span><span class="p">:</span>
+
+<span class="err">```</span><span class="n">c</span><span class="o">++</span>
+<span class="kt">void</span> <span class="n">Operation</span><span class="o">::</span><span class="n">initialize_operation</span><span class="p">(</span><span class="n">SingleTask</span> <span class="o">*</span><span class="n">ctx</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">track</span><span class="p">,</span> 
+    <span class="n">Event</span> <span class="n">child_event</span><span class="p">,</span> 
+    <span class="kt">unsigned</span> <span class="n">regs</span><span class="cm">/*= 0*/</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">parent_ctx</span> <span class="o">=</span> <span class="n">ctx</span><span class="p">;</span>
+  <span class="n">track_parent</span> <span class="o">=</span> <span class="n">track</span><span class="p">;</span>
+  <span class="n">children_mapped</span> <span class="o">=</span> <span class="n">child_event</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">track_parent</span><span class="p">)</span>
+    <span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">register_child_operation</span><span class="p">(</span><span class="k">this</span><span class="p">);</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">regs</span><span class="p">;</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+    <span class="n">unverified_regions</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">idx</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The <code>track_parent</code> flag is used to indicate that the task is local to its parent. The context for a parent will still exist when a task is running remotely, but it is primarily a proxy and all of the scheduling stuff that happens where the parent is will have this information instead.</p>
+
+<p>Handling the state transitions is easy because there is nothing to do. The operational pipeline does it for us. When the execution phase is completed the transition occurs automatically:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">Operation</span><span class="o">::</span><span class="n">complete_execution</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">bool</span> <span class="n">need_resolution</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="kt">bool</span> <span class="n">need_complete</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="c1">// Tell our parent context that we are done mapping</span>
+  <span class="c1">// It&#39;s important that this is done before we mark that we</span>
+  <span class="c1">// are executed to avoid race conditions</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">track_parent</span><span class="p">)</span>
+    <span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">register_child_executed</span><span class="p">(</span><span class="k">this</span><span class="p">);</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>For completeness, here is the final transition:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">Operation</span><span class="o">::</span><span class="n">complete_operation</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">bool</span> <span class="n">need_trigger</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="c1">// Tell our parent that we are complete</span>
+  <span class="c1">// It&#39;s important that we do this before we mark ourselves</span>
+  <span class="c1">// completed in order to avoid race conditions</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">track_parent</span><span class="p">)</span>
+    <span class="n">parent_ctx</span><span class="o">-&gt;</span><span class="n">register_child_complete</span><span class="p">(</span><span class="k">this</span><span class="p">);</span>
+<span class="p">...</span>
+</code></pre></div>
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

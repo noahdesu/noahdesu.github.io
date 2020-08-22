@@ -1,0 +1,386 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #1: Runtime Startup</title>
+  <meta name="description" content="About Legion Runtime Class">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/01/14/legion-class-runtime-startup.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #1: Runtime Startup</h1>
+    <p class="post-meta">Jan 14, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/gM8D-dFCuPM?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG" frameborder="0" allowfullscreen></iframe>
+
+<h1>Runtime Overview</h1>
+
+<p>Legion is separated into two main components: the high-level runtime (hlr) and the low-level runtime (llr). While the llr (Realm) is concerned with primitives that support execution of operations on a distributed machine, the hlr focuses on the secret Legion sauce.</p>
+
+<p>From a code POV, <code>lowlevel.h</code> is the boundary between the HLR and LLR. The naming convention of files in the Legion repository generally follows the rule that files associated with LLR stuff contain the word <code>lowlevel</code> in the filename, with the exception being <code>accessor</code> and <code>activemsg</code>. When reading code, C++ namespaces are used to separate the hlr (LegionRuntime::HighLevel) from the llr (LegionRuntime::LowLevel).</p>
+
+<p>There are currently two implementation of the llr. The first is the high-performance implementation (<code>lowlevel.cc</code>) that uses GASNet and supports GPUs and other HPC relevant things. The second is an implementation designed for use on a single node (<code>shared_lowlevel.cc</code>). These two implementations may be unified at some point.</p>
+
+<p>In contrast to a typical MPI application, Legion prefers to have a single instance of the run-time running per node (as opposed to per process) which manages all of the node resources. Are there variations and exceptions?</p>
+
+<h1>Low-level Runtime Startup</h1>
+
+<p>A Legion application is typically started using a launcher (e.g. <code>mpirun</code> or GASNet launchers) that runs a copy of the application on every node in a system. When a Legion process is launched it will first configure the runtime (e.g. registering tasks) and then it will start the runtime:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">int</span> <span class="nf">main</span><span class="p">()</span> <span class="p">{</span>
+  <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">set_top_level_task_id</span><span class="p">(</span><span class="n">TOP_LEVEL_TASK_ID</span><span class="p">);</span>
+  <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">register_single_task</span><span class="o">&lt;</span><span class="n">top_level_task</span><span class="o">&gt;</span><span class="p">(...);</span>
+  <span class="p">...</span>
+  <span class="k">return</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">start</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span> <span class="n">argv</span><span class="p">);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>The <code>HighLevelRuntime::set_top_level_task_id</code> is located in <code>legion.cc</code> and is only a thin wrapper around <code>HighLevel::Runtime::set_top_level_task_id</code>:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">void</span> <span class="n">HighLevelRuntime</span><span class="o">::</span><span class="n">set_top_level_task_id</span><span class="p">(</span><span class="n">Processor</span><span class="o">::</span><span class="n">TaskFuncID</span> <span class="n">top_id</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">Runtime</span><span class="o">::</span><span class="n">set_top_level_task_id</span><span class="p">(</span><span class="n">top_id</span><span class="p">);</span>
+<span class="p">}</span>
+
+<span class="p">...</span>
+
+<span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">set_top_level_task_id</span><span class="p">(</span><span class="n">Processor</span><span class="o">::</span><span class="n">TaskFuncID</span> <span class="n">top_id</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">legion_main_id</span> <span class="o">=</span> <span class="n">top_id</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>This level of indirection is primarily a result of several iterations of the APIs, and may be simplified in the future. A full discussion about the details of things like task registration and the associated data structures will be part of a future class on the llr? Note also that while task registration here is static, dynamic task registration will be supported in the future.</p>
+
+<p>Once we&#39;ve configured the runtime we start it. There are some static asserts at the beginning, and then the first thing we do is created a Machine instance.</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">int</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">start</span><span class="p">(</span><span class="kt">int</span> <span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">**</span><span class="n">argv</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">background</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Some static asserts that need to hold true for the runtime to work</span>
+  <span class="n">LEGION_STATIC_ASSERT</span><span class="p">(</span><span class="n">MAX_RETURN_SIZE</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">);</span>
+  <span class="n">LEGION_STATIC_ASSERT</span><span class="p">((</span><span class="mi">1</span> <span class="o">&lt;&lt;</span> <span class="n">FIELD_LOG2</span><span class="p">)</span> <span class="o">==</span> <span class="n">MAX_FIE</span>
+  <span class="p">...</span>
+  <span class="n">Machine</span> <span class="o">*</span><span class="n">m</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Machine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">argc</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">argv</span><span class="p">,</span> 
+     <span class="n">Runtime</span><span class="o">::</span><span class="n">get_task_table</span><span class="p">(</span><span class="nb">true</span><span class="cm">/*add runtime tasks*/</span><span class="p">),</span> 
+     <span class="n">Runtime</span><span class="o">::</span><span class="n">get_reduction_table</span><span class="p">(),</span> <span class="nb">false</span><span class="cm">/*cps style*/</span><span class="p">);</span></code></pre></figure>
+
+<p>A Machine instance contains lots of information about the (distributed) machine we are running on, not just the local node. Recall that the startup process being described is a result of the Legion process running on all nodes in the system, and as such, each Legion process will eventually have a copy of the Machine instance. That is, each Legion process knows about the structure of the entire system. We&#39;ll see how that information is obtained shortly.</p>
+
+<p>The next thing that occurs during <code>Runtime::start</code> is that numerous high-level runtime options are parsed from the command line:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">argc</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">BOOL_ARG</span><span class="p">(</span><span class="s">&quot;-hl:imprecise&quot;</span><span class="p">,</span><span class="n">enable_imprecise_filter</span><span class="p">);</span>
+  <span class="n">BOOL_ARG</span><span class="p">(</span><span class="s">&quot;-hl:separate&quot;</span><span class="p">,</span><span class="n">separate_runtime_instances</span><span class="p">);</span>
+  <span class="p">...</span></code></pre></figure>
+
+<p>Once this is complete we kick the machine to start running:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">m</span><span class="o">-&gt;</span><span class="n">run</span><span class="p">(</span><span class="mi">0</span><span class="p">,</span> <span class="n">Machine</span><span class="o">::</span><span class="n">ONE_TASK_ONLY</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">background</span><span class="p">);</span>
+<span class="n">assert</span><span class="p">(</span><span class="n">background</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">background</span><span class="p">)</span>
+  <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+<span class="k">else</span>
+  <span class="k">return</span> <span class="o">-</span><span class="mi">1</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>When <code>background</code> is true we return to the caller, otherwise the <code>Machine::run</code> will take care of process termination. Returning to the caller is useful if there are other things that need to be done after starting Legion, such as managing threads or doing some MPI stuff.</p>
+
+<h2>LLR Bootstrap / Machine Startup</h2>
+
+<p>During runtime startup we created a Machine instance which stores all the details of the distributed machine. Two things are going on with Machine. During initialization we do all the discovery stuff. Then the runtime calls <code>Machine::run</code> which starts the ball rolling.</p>
+
+<p>Discovery of machine details happen in the Machine constructor:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">Machine</span><span class="o">::</span><span class="n">Machine</span><span class="p">(</span><span class="kt">int</span> <span class="o">*</span><span class="n">argc</span><span class="p">,</span> <span class="kt">char</span> <span class="o">***</span><span class="n">argv</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">Processor</span><span class="o">::</span><span class="n">TaskIDTable</span> <span class="o">&amp;</span><span class="n">task_table</span><span class="p">,</span>
+    <span class="k">const</span> <span class="n">ReductionOpTable</span> <span class="o">&amp;</span><span class="n">redop_table</span><span class="p">,</span>
+    <span class="kt">bool</span> <span class="n">cps_style</span> <span class="cm">/* = false */</span><span class="p">,</span>
+    <span class="n">Processor</span><span class="o">::</span><span class="n">TaskFuncID</span> <span class="n">init_id</span> <span class="cm">/* = 0 */</span><span class="p">)</span>
+      <span class="o">:</span> <span class="n">background_pthread</span><span class="p">(</span><span class="nb">NULL</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">the_machine</span> <span class="o">=</span> <span class="k">this</span><span class="p">;</span></code></pre></figure>
+
+<p>The <code>the_machine</code> can be considered a singleton. Next we stash away some of the parameters:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">for</span><span class="p">(</span><span class="n">ReductionOpTable</span><span class="o">::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> <span class="n">redop_table</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span>
+  <span class="n">it</span> <span class="o">!=</span> <span class="n">redop_table</span><span class="p">.</span><span class="n">end</span><span class="p">();</span>
+  <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+    <span class="n">reduce_op_table</span><span class="p">[</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">first</span><span class="p">]</span> <span class="o">=</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span></code></pre></figure>
+
+<p>In this case we are recording a mapping between reduction id and reduction implementation. We do the same thing for the set of tasks. Next up we parse all the low-level configuration flags from the command line:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="o">*</span><span class="n">argc</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">INT_ARG</span><span class="p">(</span><span class="s">&quot;-ll:gsize&quot;</span><span class="p">,</span> <span class="n">gasnet_mem_size_in_mb</span><span class="p">);</span>
+  <span class="n">INT_ARG</span><span class="p">(</span><span class="s">&quot;-ll:csize&quot;</span><span class="p">,</span> <span class="n">cpu_mem_size_in_mb</span><span class="p">);</span>
+  <span class="n">INT_ARG</span><span class="p">(</span><span class="s">&quot;-ll:rsize&quot;</span><span class="p">,</span> <span class="n">reg_mem_size_in_mb</span><span class="p">);</span>
+  <span class="p">...</span></code></pre></figure>
+
+<p>The next big thing that happens is that GASNet is initialized. In the high-performance llr implementation GASNet services as the fabric for inter-process messaging and memory exchange.</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">CHECK_GASNET</span><span class="p">(</span> <span class="n">gasnet_init</span><span class="p">(</span><span class="n">argc</span><span class="p">,</span> <span class="n">argv</span><span class="p">)</span> <span class="p">);</span></code></pre></figure>
+
+<p>Then we setup all of the GASNet active message handlers for the various types of messages that will be sent around between processes. There are a bunch of different message types:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">gasnet_handlerentry_t</span> <span class="n">handlers</span><span class="p">[</span><span class="mi">128</span><span class="p">];</span>
+<span class="kt">int</span> <span class="n">hcount</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+<span class="n">hcount</span> <span class="o">+=</span> <span class="n">NodeAnnounceMessage</span><span class="o">::</span><span class="n">add_handler_entries</span><span class="p">(</span><span class="o">&amp;</span><span class="n">handlers</span><span class="p">[</span><span class="n">hcount</span><span class="p">],</span> <span class="s">&quot;Node Announce AM&quot;</span><span class="p">);</span>
+<span class="n">hcount</span> <span class="o">+=</span> <span class="n">SpawnTaskMessage</span><span class="o">::</span><span class="n">add_handler_entries</span><span class="p">(</span><span class="o">&amp;</span><span class="n">handlers</span><span class="p">[</span><span class="n">hcount</span><span class="p">],</span> <span class="s">&quot;Spawn Task AM&quot;</span><span class="p">);</span>
+<span class="n">hcount</span> <span class="o">+=</span> <span class="n">LockRequestMessage</span><span class="o">::</span><span class="n">add_handler_entries</span><span class="p">(</span><span class="o">&amp;</span><span class="n">handlers</span><span class="p">[</span><span class="n">hcount</span><span class="p">],</span> <span class="s">&quot;Lock Request AM&quot;</span><span class="p">);</span></code></pre></figure>
+
+<p>There will be more information on the low-level runtime such as the active messages in a later discussion. Next we setup the actual low-level runtime. In this way, the Machine object effectively bootstraps the low-level runtime:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">Runtime</span> <span class="o">*</span><span class="n">r</span> <span class="o">=</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">runtime</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Runtime</span><span class="p">;</span>
+<span class="n">r</span><span class="o">-&gt;</span><span class="n">nodes</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Node</span><span class="p">[</span><span class="n">gasnet_nodes</span><span class="p">()];</span></code></pre></figure>
+
+<p>Next we create this thing called <code>NodeAnnounceData announce_data;</code> that will get filled up with the details of our local hardware like the different memories, processors, and GPUs. After we&#39;ve filled in this data, we register the information with ourselves. Then we simultaneously broadcast our information to every other node as well as incorporate the announcement data from other nodes into our own view of the machine.</p>
+
+<p>First, handle our own specs:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="p">{</span>
+  <span class="n">AutoHSLLock</span> <span class="n">al</span><span class="p">(</span><span class="n">announcement_mutex</span><span class="p">);</span>
+  <span class="n">parse_node_announce_data</span><span class="p">(</span><span class="n">adata</span><span class="p">,</span> <span class="n">apos</span><span class="o">*</span><span class="k">sizeof</span><span class="p">(</span><span class="n">adata</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="n">announce_data</span><span class="p">,</span> <span class="nb">false</span><span class="p">);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>Then broadcast:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">for</span><span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">gasnet_nodes</span><span class="p">();</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">i</span> <span class="o">!=</span> <span class="n">gasnet_mynode</span><span class="p">())</span>
+    <span class="n">NodeAnnounceMessage</span><span class="o">::</span><span class="n">request</span><span class="p">(</span><span class="n">i</span><span class="p">,</span> <span class="n">announce_data</span><span class="p">,</span> <span class="n">adata</span><span class="p">,</span>
+      <span class="n">apos</span><span class="o">*</span><span class="k">sizeof</span><span class="p">(</span><span class="n">adata</span><span class="p">[</span><span class="mi">0</span><span class="p">]),</span> <span class="n">PAYLOAD_COPY</span><span class="p">);</span></code></pre></figure>
+
+<p>And finally we wait for announcements from all other nodes in the system before proceeding. Note that during the handling of an announcement from a peer node, the details of that node are incorporating into our local view, so there is no more handling of that data explicitly during machine initialization.</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">while</span><span class="p">(</span><span class="n">announcements_received</span> <span class="o">&lt;</span> <span class="p">(</span><span class="n">gasnet_nodes</span><span class="p">()</span> <span class="o">-</span> <span class="mi">1</span><span class="p">))</span>
+  <span class="n">do_some_polling</span><span class="p">();</span></code></pre></figure>
+
+<p>Those are the major points discussed regarding Machine setup. More details will be discussed in a later class. Next we&#39;ll go over <code>Machine::run</code> which is the second phase of low-level runtime startup.</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">void</span> <span class="n">Machine</span><span class="o">::</span><span class="n">run</span><span class="p">(</span><span class="n">Processor</span><span class="o">::</span><span class="n">TaskFuncID</span> <span class="n">task_id</span> <span class="cm">/*= 0*/</span><span class="p">,</span>
+    <span class="n">RunStyle</span> <span class="n">style</span> <span class="cm">/*= ONE_TASK_ONLY*/</span><span class="p">,</span>
+    <span class="k">const</span> <span class="kt">void</span> <span class="o">*</span><span class="n">args</span> <span class="cm">/*= 0*/</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">arglen</span> <span class="cm">/*= 0*/</span><span class="p">,</span>
+    <span class="kt">bool</span> <span class="n">background</span> <span class="cm">/*= false*/</span><span class="p">)</span></code></pre></figure>
+
+<p>Note the <code>background</code> parameter. If this is true then the first thing this method does is kick off a thread which will re-run this method immediately with <code>background = false</code> and then return. Next is the construction of worker threads for the various processors in the system. At this point things are rolling. So we don&#39;t do anything except wait for the &quot;job&quot; to complete:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="k">while</span><span class="p">(</span><span class="n">running_proc_count</span><span class="p">.</span><span class="n">get</span><span class="p">()</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+  <span class="n">sleep</span><span class="p">(</span><span class="mi">1</span><span class="p">);</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>This loops around until there is nothing left to do. After that is just some clean-up. So, the natural question here is where did control go? How does the main task eventual start running? This is the domain of the high-level runtime bootstrapping process.</p>
+
+<h1>HLR Bootstrap</h1>
+
+<p>Recall that during <code>Runtime::start</code> the task table is passed to the constructor of the Machine instance that is created:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++">  <span class="n">Machine</span> <span class="o">*</span><span class="n">m</span> <span class="o">=</span> <span class="k">new</span> <span class="n">Machine</span><span class="p">(</span><span class="o">&amp;</span><span class="n">argc</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">argv</span><span class="p">,</span> 
+     <span class="n">Runtime</span><span class="o">::</span><span class="n">get_task_table</span><span class="p">(</span><span class="nb">true</span><span class="cm">/*add runtime tasks*/</span><span class="p">),</span> 
+     <span class="n">Runtime</span><span class="o">::</span><span class="n">get_reduction_table</span><span class="p">(),</span> <span class="nb">false</span><span class="cm">/*cps style*/</span><span class="p">);</span></code></pre></figure>
+
+<p>Notice that <code>Runtime::get_task_table</code> is passed <code>true</code>. If we look at this method:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">Processor</span><span class="o">::</span><span class="n">TaskIDTable</span><span class="o">&amp;</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">get_task_table</span><span class="p">(</span><span class="kt">bool</span> <span class="n">add_runtime_tasks</span> <span class="cm">/*= true*/</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">static</span> <span class="n">Processor</span><span class="o">::</span><span class="n">TaskIDTable</span> <span class="n">table</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">add_runtime_tasks</span><span class="p">)</span>
+        <span class="n">Runtime</span><span class="o">::</span><span class="n">register_runtime_tasks</span><span class="p">(</span><span class="n">table</span><span class="p">);</span>
+  <span class="k">return</span> <span class="n">table</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>We see that when the task table is retrieved when creating the Machine instance that <code>Runtime::register_runtime_tasks</code> is called as a side effect. Digging a little further we see that some specific tasks are added to the task table:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">register_runtime_tasks</span><span class="p">(</span><span class="n">Processor</span><span class="o">::</span><span class="n">TaskIDTable</span> <span class="o">&amp;</span><span class="n">table</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="p">...</span>
+  <span class="n">table</span><span class="p">[</span><span class="n">INIT_FUNC_ID</span><span class="p">]</span>          <span class="o">=</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">initialize_runtime</span><span class="p">;</span>
+  <span class="n">table</span><span class="p">[</span><span class="n">SHUTDOWN_FUNC_ID</span><span class="p">]</span>      <span class="o">=</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">shutdown_runtime</span><span class="p">;</span>
+  <span class="n">table</span><span class="p">[</span><span class="n">HLR_TASK_ID</span><span class="p">]</span>           <span class="o">=</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">high_level_runtime_task</span><span class="p">;</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>In particular, the special task with ID <code>INIT_FUNC_ID</code> is what is used to initialize the runtime. When a processor starts up it looks for such a task. In the following, <code>INIT_FUNC_ID</code> is equivalent to <code>Processor::TASK_ID_PROCESSOR_INIT</code>:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="n">Processor</span><span class="o">::</span><span class="n">TaskIDTable</span><span class="o">::</span><span class="n">iterator</span> <span class="n">it</span> <span class="o">=</span> <span class="n">task_id_table</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">Processor</span><span class="o">::</span><span class="n">TASK_ID_PROCESSOR_INIT</span><span class="p">);</span>
+<span class="k">if</span> <span class="p">(</span><span class="n">it</span> <span class="o">!=</span> <span class="n">task_id_table</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+  <span class="p">(</span><span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">)(</span><span class="mi">0</span><span class="p">,</span> <span class="mi">0</span><span class="p">,</span> <span class="n">proc</span><span class="o">-&gt;</span><span class="n">me</span><span class="p">);</span>
+<span class="k">else</span>
+  <span class="p">...</span></code></pre></figure>
+
+<p>So in summary a processor gets spun up and first thing it does is looks for an initialization task to run. In this case it is <code>Runtime::initialize_runtime</code>. This routine eventually calls <code>local_rt-&gt;launch_top_level_task</code> before returning.</p>
+
+<p>As part of the setup done in <code>Runtime::initialize_runtime</code> there is a Runtime instance created, referred to as <code>local_rt</code>, and then this is associated with each processor. It isn&#39;t clear what this is for, although it seems like it is the HLR, where as the Runtime instance created during Machine setup is the LLR. I think this will be discussed further in a future class.</p>
+
+<p>We&#39;ve finally reached <code>Runtime::launch_top_level_task(Processor proc)</code>. This method does some basic context setup, and finally adds the task (remember <code>legion_main_id</code> ?) to the ready queue by calling <code>add_to_ready_queue(proc, top_task, false/*prev failure*/);</code> which then treats the top level task like any other task. Note that this method is only called once in the system. The uniqueness of the caller is determined by the check:</p>
+
+<figure class="highlight"><pre><code class="language-c--" data-lang="c++"><span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">launch_top_level_task</span><span class="p">(</span><span class="n">Processor</span> <span class="n">proc</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">((</span><span class="n">address_space</span> <span class="o">==</span> <span class="mi">0</span><span class="p">)</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">proc</span> <span class="o">==</span> <span class="o">*</span><span class="p">(</span><span class="n">local_procs</span><span class="p">.</span><span class="n">begin</span><span class="p">())))</span> <span class="p">{</span>
+    <span class="p">...</span>
+  <span class="p">}</span>
+<span class="p">}</span></code></pre></figure>
+
+<p>Phew. And that&#39;s it: the application is running.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

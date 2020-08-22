@@ -1,0 +1,523 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #14: Region Tree State and Contexts</title>
+  <meta name="description" content="Overview">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/03/23/region-state-and-contexts.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #14: Region Tree State and Contexts</h1>
+    <p class="post-meta">Mar 23, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>Overview</h1>
+
+<p>In this class we&#39;ll talk about the region trees, contexts, and some utility data structures.</p>
+
+<h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/gUFu3kOynnE?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG" frameborder="0" allowfullscreen></iframe>
+
+<h1>Region Tree Creation</h1>
+
+<p>A logical region tree is created by taking the cross product of an index space and a field space. The logical region tree is identified by a 3-tuple consisting of the index space, field space, and a unique region tree ID. This is where a logical region is created:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="n">LogicalRegion</span> <span class="nf">create_logical_region</span><span class="p">(</span><span class="n">Context</span> <span class="n">ctx</span><span class="p">,</span> <span class="n">IndexSpace</span> <span class="n">index</span><span class="p">,</span> 
+                                          <span class="n">FieldSpace</span> <span class="n">fields</span><span class="p">);</span>
+</code></pre></div>
+<p>The you can see that the logical region structure is a light-weight handle. Below is the 3-tuple:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">LogicalRegion</span> <span class="p">{</span>
+    <span class="p">...</span>
+    <span class="k">private</span><span class="o">:</span>
+      <span class="c1">// These are private so the user can&#39;t just arbitrarily change them</span>
+      <span class="n">RegionTreeID</span> <span class="n">tree_id</span><span class="p">;</span>
+      <span class="n">IndexSpace</span> <span class="n">index_space</span><span class="p">;</span>
+      <span class="n">FieldSpace</span> <span class="n">field_space</span><span class="p">;</span>
+    <span class="p">};</span>
+</code></pre></div>
+<p>When a logical region is created first a unique ID is generated, and then generate the handle. After we create the handle we ask the region tree forest to create the region for us.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">LogicalRegion</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">create_logical_region</span><span class="p">(</span><span class="n">Context</span> <span class="n">ctx</span><span class="p">,</span> 
+                                <span class="n">IndexSpace</span> <span class="n">index_space</span><span class="p">,</span> <span class="n">FieldSpace</span> <span class="n">field_space</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="n">RegionTreeID</span> <span class="n">tid</span> <span class="o">=</span> <span class="n">get_unique_tree_id</span><span class="p">();</span>
+      <span class="n">LogicalRegion</span> <span class="nf">region</span><span class="p">(</span><span class="n">tid</span><span class="p">,</span> <span class="n">index_space</span><span class="p">,</span> <span class="n">field_space</span><span class="p">);</span>
+      <span class="n">forest</span><span class="o">-&gt;</span><span class="n">create_logical_region</span><span class="p">(</span><span class="n">region</span><span class="p">);</span>
+      <span class="c1">// Register the creation of a top-level region with the context</span>
+      <span class="n">ctx</span><span class="o">-&gt;</span><span class="n">register_region_creation</span><span class="p">(</span><span class="n">region</span><span class="p">);</span>
+      <span class="k">return</span> <span class="n">region</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Similar to what we&#39;ve seen before, we use the overloaded <code>create_node</code> method. Here we are creating a new tree so there is no parent because this node will be the root of the tree.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">create_logical_region</span><span class="p">(</span><span class="n">LogicalRegion</span> <span class="n">handle</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// We do need the autolock here since we&#39;re going to be making</span>
+      <span class="c1">// region tree nodes</span>
+      <span class="n">AutoLock</span> <span class="n">f_lock</span><span class="p">(</span><span class="n">forest_lock</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*exclusive*/</span><span class="p">);</span>
+      <span class="n">create_node</span><span class="p">(</span><span class="n">handle</span><span class="p">,</span> <span class="nb">NULL</span><span class="cm">/*parent*/</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>In <code>create_node</code> a new <code>PartitionNode</code> is created. The index space and field space are referred to as the row and column sources, respectively. With references to them we create the new partition node.</p>
+
+<p>Next we lookup the partition node in the <code>part_nodes</code> data structure. If it&#39;s found then we are done. Like previous instances of <code>create_node</code> we&#39;ve seen, the creation can race. If we don&#39;t find it, then we add it to <code>part_nodes</code>, and call <code>reserve_contexts</code>, which we&#39;ll discuss later.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">PartitionNode</span><span class="o">*</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">create_node</span><span class="p">(</span><span class="n">LogicalPartition</span> <span class="n">p</span><span class="p">,</span>
+                                                 <span class="n">RegionNode</span> <span class="o">*</span><span class="n">parent</span><span class="p">)</span>
+    <span class="c1">//--------------------------------------------------------------------------</span>
+    <span class="p">{</span>
+      <span class="n">IndexPartNode</span> <span class="o">*</span><span class="n">row_src</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">index_partition</span><span class="p">);</span>
+      <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">col_src</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">p</span><span class="p">.</span><span class="n">field_space</span><span class="p">);</span>
+      <span class="n">PartitionNode</span> <span class="o">*</span><span class="n">result</span> <span class="o">=</span> <span class="k">new</span> <span class="n">PartitionNode</span><span class="p">(</span><span class="n">p</span><span class="p">,</span> <span class="n">parent</span><span class="p">,</span> <span class="n">row_src</span><span class="p">,</span> 
+                                                <span class="n">col_src</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+
+      <span class="c1">// Special case here in case multiple clients attempt</span>
+      <span class="c1">// to make the node at the same time</span>
+      <span class="p">{</span>
+        <span class="c1">// Hole the lookup lock when modifying the lookup table</span>
+        <span class="n">AutoLock</span> <span class="n">l_lock</span><span class="p">(</span><span class="n">lookup_lock</span><span class="p">);</span>
+        <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">LogicalPartition</span><span class="p">,</span><span class="n">PartitionNode</span><span class="o">*&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span>
+          <span class="n">part_nodes</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">p</span><span class="p">);</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">it</span> <span class="o">!=</span> <span class="n">part_nodes</span><span class="p">.</span><span class="n">end</span><span class="p">())</span>
+        <span class="p">{</span>
+          <span class="c1">// It already exists, delete our copy and</span>
+          <span class="c1">// return the one that has already been made</span>
+          <span class="k">delete</span> <span class="n">result</span><span class="p">;</span>
+          <span class="k">return</span> <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="p">;</span>
+        <span class="p">}</span>
+        <span class="c1">// Now make sure that the node has the right number of contexts</span>
+        <span class="c1">// before we put it on the map and release the look-up lock.</span>
+        <span class="c1">// Note that this is only safe because the runtime ups the </span>
+        <span class="c1">// total_context count in allocate_context before calling the</span>
+        <span class="c1">// resize_node_contexts funciton.</span>
+        <span class="n">result</span><span class="o">-&gt;</span><span class="n">reserve_contexts</span><span class="p">(</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">get_context_count</span><span class="p">());</span>
+        <span class="c1">// Now we can put the node in the map</span>
+        <span class="n">part_nodes</span><span class="p">[</span><span class="n">p</span><span class="p">]</span> <span class="o">=</span> <span class="n">result</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="c1">// Now we can make the other ways of accessing the node available</span>
+      <span class="n">row_src</span><span class="o">-&gt;</span><span class="n">add_instance</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+      <span class="n">parent</span><span class="o">-&gt;</span><span class="n">add_child</span><span class="p">(</span><span class="n">result</span><span class="p">);</span>
+
+      <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Looking at the high-level interface to Legion we see calls that can partition index spaces, but there are no calls to partition a logical partition. The reason for this is that when an index space is partitioned, the logical regions created from that index space automatically have those partitions created.</p>
+
+<p>Here&#39;s how we lookup a logical partition.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">LogicalPartition</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">get_logical_partition</span><span class="p">(</span><span class="n">Context</span> <span class="n">ctx</span><span class="p">,</span> 
+                                    <span class="n">LogicalRegion</span> <span class="n">parent</span><span class="p">,</span> <span class="n">IndexPartition</span> <span class="n">handle</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="k">return</span> <span class="n">forest</span><span class="o">-&gt;</span><span class="n">get_logical_partition</span><span class="p">(</span><span class="n">parent</span><span class="p">,</span> <span class="n">handle</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>In some cases, there is no lookup. We can just construct the handle and return it.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">LogicalPartition</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">get_logical_partition</span><span class="p">(</span>
+                                    <span class="n">LogicalRegion</span> <span class="n">parent</span><span class="p">,</span> <span class="n">IndexPartition</span> <span class="n">handle</span><span class="p">)</span>
+    <span class="c1">//--------------------------------------------------------------------------</span>
+    <span class="p">{</span>
+      <span class="c1">// No lock needed for this one</span>
+      <span class="k">return</span> <span class="n">LogicalPartition</span><span class="p">(</span><span class="n">parent</span><span class="p">.</span><span class="n">tree_id</span><span class="p">,</span> <span class="n">handle</span><span class="p">,</span> <span class="n">parent</span><span class="p">.</span><span class="n">field_space</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>In other cases we may need to do some additional work. Here we want to lookup by color, so we need to first examine the forest to find elements with the specified color, but then can create the handle from the results.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="n">LogicalPartition</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">get_logical_partition_by_color</span><span class="p">(</span>
+                                                <span class="n">LogicalRegion</span> <span class="n">parent</span><span class="p">,</span> <span class="n">Color</span> <span class="n">c</span><span class="p">)</span>
+    <span class="c1">//--------------------------------------------------------------------------</span>
+    <span class="p">{</span>
+      <span class="n">AutoLock</span> <span class="n">f_lock</span><span class="p">(</span><span class="n">forest_lock</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*exclusive*/</span><span class="p">);</span>
+      <span class="n">RegionNode</span> <span class="o">*</span><span class="n">parent_node</span> <span class="o">=</span> <span class="n">get_node</span><span class="p">(</span><span class="n">parent</span><span class="p">);</span>
+      <span class="n">IndexPartNode</span> <span class="o">*</span><span class="n">index_node</span> <span class="o">=</span> <span class="n">parent_node</span><span class="o">-&gt;</span><span class="n">row_source</span><span class="o">-&gt;</span><span class="n">get_child</span><span class="p">(</span><span class="n">c</span><span class="p">);</span>
+      <span class="n">LogicalPartition</span> <span class="nf">result</span><span class="p">(</span><span class="n">parent</span><span class="p">.</span><span class="n">tree_id</span><span class="p">,</span> <span class="n">index_node</span><span class="o">-&gt;</span><span class="n">handle</span><span class="p">,</span> 
+                              <span class="n">parent</span><span class="p">.</span><span class="n">field_space</span><span class="p">);</span>
+      <span class="k">return</span> <span class="n">result</span><span class="p">;</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>Recall that index and field spaces were created eagerly. Region trees are created lazily. This is obvious from the <code>get_logical_partition</code> call for instance where we construct a handle without even ensuring that the tree has the relevant elements.</p>
+
+<p>The <code>RegionNode</code> and <code>PartitionNode</code> that make up the elements in the region tree are both subclasses of <code>RegionTreeNode</code>. A <code>RegionNode</code> contains a lot of methods (not shown), as well as pointers to other parts of the tree for its index space and field space. The color maps track information related to children, which we&#39;ll discuss in a later talk.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">RegionNode</span> <span class="o">:</span> <span class="k">public</span> <span class="n">RegionTreeNode</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">RegionNode</span><span class="p">(</span><span class="n">LogicalRegion</span> <span class="n">r</span><span class="p">,</span> <span class="n">PartitionNode</span> <span class="o">*</span><span class="n">par</span><span class="p">,</span> <span class="n">IndexSpaceNode</span> <span class="o">*</span><span class="n">row_src</span><span class="p">,</span>
+                 <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">col_src</span><span class="p">,</span> <span class="n">RegionTreeForest</span> <span class="o">*</span><span class="n">ctx</span><span class="p">);</span>
+      <span class="n">RegionNode</span><span class="p">(</span><span class="k">const</span> <span class="n">RegionNode</span> <span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+    <span class="p">...</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="k">const</span> <span class="n">LogicalRegion</span> <span class="n">handle</span><span class="p">;</span>
+      <span class="n">PartitionNode</span> <span class="o">*</span><span class="k">const</span> <span class="n">parent</span><span class="p">;</span>
+      <span class="n">IndexSpaceNode</span> <span class="o">*</span><span class="k">const</span> <span class="n">row_source</span><span class="p">;</span>
+    <span class="k">protected</span><span class="o">:</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Color</span><span class="p">,</span><span class="n">PartitionNode</span><span class="o">*&gt;</span> <span class="n">color_map</span><span class="p">;</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Color</span><span class="p">,</span><span class="n">PartitionNode</span><span class="o">*&gt;</span> <span class="n">valid_map</span><span class="p">;</span>
+</code></pre></div>
+<p>The <code>PartitionNode</code> is similar, and includes extra information like if this partition is disjoint.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">PartitionNode</span> <span class="o">:</span> <span class="k">public</span> <span class="n">RegionTreeNode</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">PartitionNode</span><span class="p">(</span><span class="n">LogicalPartition</span> <span class="n">p</span><span class="p">,</span> <span class="n">RegionNode</span> <span class="o">*</span><span class="n">par</span><span class="p">,</span> 
+                    <span class="n">IndexPartNode</span> <span class="o">*</span><span class="n">row_src</span><span class="p">,</span> <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">col_src</span><span class="p">,</span>
+                    <span class="n">RegionTreeForest</span> <span class="o">*</span><span class="n">ctx</span><span class="p">);</span>
+      <span class="n">PartitionNode</span><span class="p">(</span><span class="k">const</span> <span class="n">PartitionNode</span> <span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+
+    <span class="k">public</span><span class="o">:</span>
+      <span class="k">const</span> <span class="n">LogicalPartition</span> <span class="n">handle</span><span class="p">;</span>
+      <span class="n">RegionNode</span> <span class="o">*</span><span class="k">const</span> <span class="n">parent</span><span class="p">;</span>
+      <span class="n">IndexPartNode</span> <span class="o">*</span><span class="k">const</span> <span class="n">row_source</span><span class="p">;</span>
+      <span class="k">const</span> <span class="kt">bool</span> <span class="n">disjoint</span><span class="p">;</span>
+    <span class="k">protected</span><span class="o">:</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Color</span><span class="p">,</span><span class="n">RegionNode</span><span class="o">*&gt;</span> <span class="n">color_map</span><span class="p">;</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Color</span><span class="p">,</span><span class="n">RegionNode</span><span class="o">*&gt;</span> <span class="n">valid_map</span><span class="p">;</span>
+</code></pre></div>
+<p>The <code>RegionTreeNode</code> contains state that is common to both types of region tree nodes. The context shown below isn&#39;t the same type of context we&#39;ve seen in other areas, its just an overloaded term here. The NodeMask tracks which nodes have been created or destroyed in the cluster. The reservation structure restricts concurrent access to these data structures.</p>
+
+<p>The logical and physical state structures are the most important. These store all of the state information needed for performing logical and physical analysis. The legion stack structure is a special structure used that allow expansion without moving already allocated data.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">RegionTreeNode</span> <span class="p">{</span> 
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">RegionTreeNode</span><span class="p">(</span><span class="n">RegionTreeForest</span> <span class="o">*</span><span class="n">ctx</span><span class="p">,</span> <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="n">column</span><span class="p">);</span>
+      <span class="k">virtual</span> <span class="o">~</span><span class="n">RegionTreeNode</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+    <span class="p">...</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">RegionTreeForest</span> <span class="o">*</span><span class="k">const</span> <span class="n">context</span><span class="p">;</span>
+      <span class="n">FieldSpaceNode</span> <span class="o">*</span><span class="k">const</span> <span class="n">column_source</span><span class="p">;</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">NodeMask</span> <span class="n">creation_set</span><span class="p">;</span>
+      <span class="n">NodeMask</span> <span class="n">destruction_set</span><span class="p">;</span>
+    <span class="k">protected</span><span class="o">:</span>
+      <span class="n">Reservation</span> <span class="n">node_lock</span><span class="p">;</span>
+      <span class="n">LegionStack</span><span class="o">&lt;</span><span class="n">LogicalState</span><span class="p">,</span><span class="n">MAX_CONTEXTS</span><span class="p">,</span><span class="n">DEFAULT_CONTEXTS</span><span class="o">&gt;</span> <span class="n">logical_states</span><span class="p">;</span>
+      <span class="n">LegionStack</span><span class="o">&lt;</span><span class="n">PhysicalState</span><span class="p">,</span><span class="n">MAX_CONTEXTS</span><span class="p">,</span><span class="n">DEFAULT_CONTEXTS</span><span class="o">&gt;</span> <span class="n">physical_states</span><span class="p">;</span>
+    <span class="k">protected</span><span class="o">:</span>
+      <span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">SemanticTag</span><span class="p">,</span><span class="n">SemanticInfo</span><span class="o">&gt;::</span><span class="n">aligned</span> <span class="n">semantic_info</span><span class="p">;</span>
+    <span class="p">};</span>
+</code></pre></div>
+<p>So what exactly are these contexts that we keep talking about. They are <code>RegionTreeContext</code>. Each time we start a task that is not a leaf we create a new context object. It&#39;s a handle to index into those logical and physical states. We can see below that a region tree context is really a wrapper around an integer.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">class</span> <span class="nc">RegionTreeContext</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">RegionTreeContext</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">ctx</span><span class="p">(</span><span class="o">-</span><span class="mi">1</span><span class="p">)</span> <span class="p">{</span> <span class="p">}</span>
+      <span class="n">RegionTreeContext</span><span class="p">(</span><span class="n">ContextID</span> <span class="n">c</span><span class="p">)</span>
+        <span class="o">:</span> <span class="n">ctx</span><span class="p">(</span><span class="n">c</span><span class="p">)</span> <span class="p">{</span> <span class="p">}</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="kr">inline</span> <span class="kt">bool</span> <span class="n">exists</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span> <span class="k">const</span> <span class="p">{</span> <span class="k">return</span> <span class="p">(</span><span class="n">ctx</span> <span class="o">&gt;=</span> <span class="mi">0</span><span class="p">);</span> <span class="p">}</span>
+      <span class="kr">inline</span> <span class="n">ContextID</span> <span class="n">get_id</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span> <span class="k">const</span> 
+      <span class="p">{</span>
+        <span class="k">return</span> <span class="n">ContextID</span><span class="p">(</span><span class="n">ctx</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="k">private</span><span class="o">:</span>
+      <span class="kt">int</span> <span class="n">ctx</span><span class="p">;</span>
+    <span class="p">};</span>
+</code></pre></div>
+<p>The runtime maintains a pool of region tree contexts which are allocated via <code>allocate_context</code> when a task starts. If there aren&#39;t enough, then we&#39;ll allocate more. Several are allocated at once because it can be an expensive operation. Recall that the region nodes are indexed by the context. When we allocate a brand new context, we also iterate over all of the nodes in the every region tree and guarantee that there is space allocated for the new context. That&#39;s why it is expensive. The expensive call occurs at the end of the method by calling <code>forest-&gt;resize_node_contexts(current_contexts);</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">allocate_context</span><span class="p">(</span><span class="n">SingleTask</span> <span class="o">*</span><span class="n">task</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// Try getting something off the list of available contexts</span>
+      <span class="n">AutoLock</span> <span class="n">avail_lock</span><span class="p">(</span><span class="n">available_lock</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">available_contexts</span><span class="p">.</span><span class="n">empty</span><span class="p">())</span>
+      <span class="p">{</span>
+        <span class="n">task</span><span class="o">-&gt;</span><span class="n">assign_context</span><span class="p">(</span><span class="n">available_contexts</span><span class="p">.</span><span class="n">front</span><span class="p">());</span>
+        <span class="n">available_contexts</span><span class="p">.</span><span class="n">pop_front</span><span class="p">();</span>
+        <span class="k">return</span><span class="p">;</span>
+      <span class="p">}</span>
+      <span class="c1">// If we failed to get a context, double the number of total </span>
+      <span class="c1">// contexts and then update the forest nodes to have the right</span>
+      <span class="c1">// number of contexts available</span>
+      <span class="n">task</span><span class="o">-&gt;</span><span class="n">assign_context</span><span class="p">(</span><span class="n">RegionTreeContext</span><span class="p">(</span><span class="n">total_contexts</span><span class="p">));</span>
+      <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">1</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">total_contexts</span><span class="p">;</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">available_contexts</span><span class="p">.</span><span class="n">push_back</span><span class="p">(</span><span class="n">RegionTreeContext</span><span class="p">(</span><span class="n">total_contexts</span><span class="o">+</span><span class="n">idx</span><span class="p">));</span>
+      <span class="p">}</span>
+      <span class="c1">// Mark that we doubled the total number of contexts</span>
+      <span class="c1">// Very important that we do this before calling the</span>
+      <span class="c1">// RegionTreeForest&#39;s resize method!</span>
+      <span class="kt">unsigned</span> <span class="n">current_contexts</span> <span class="o">=</span> <span class="n">total_contexts</span><span class="p">;</span>
+      <span class="n">__sync_fetch_and_add</span><span class="p">(</span><span class="o">&amp;</span><span class="n">total_contexts</span><span class="p">,</span><span class="n">current_contexts</span><span class="p">);</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">total_contexts</span> <span class="o">&gt;</span> <span class="n">MAX_CONTEXTS</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">log_run</span><span class="p">(</span><span class="n">LEVEL_ERROR</span><span class="p">,</span><span class="s">&quot;ERROR: Maximum number of allowed contexts %d &quot;</span>
+                            <span class="s">&quot;exceeded when initializing task %s (UID %lld). &quot;</span>
+                            <span class="s">&quot;Please change &#39;MAX_CONTEXTS&#39; at top &quot;</span>
+                            <span class="s">&quot;of legion_config.h and recompile. It is also &quot;</span>
+                            <span class="s">&quot;possible to reduce context usage by annotating &quot;</span>
+                            <span class="s">&quot;task variants as leaf tasks since leaf tasks do &quot;</span>
+                            <span class="s">&quot;not require context allocation.&quot;</span><span class="p">,</span>
+                            <span class="n">MAX_CONTEXTS</span><span class="p">,</span> <span class="n">task</span><span class="o">-&gt;</span><span class="n">variants</span><span class="o">-&gt;</span><span class="n">name</span><span class="p">,</span>
+                            <span class="n">task</span><span class="o">-&gt;</span><span class="n">get_unique_task_id</span><span class="p">());</span>
+        <span class="n">exit</span><span class="p">(</span><span class="n">ERROR_EXCEEDED_MAX_CONTEXTS</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="c1">// Tell the forest to resize the number of available contexts</span>
+      <span class="c1">// on all the nodes</span>
+      <span class="n">forest</span><span class="o">-&gt;</span><span class="n">resize_node_contexts</span><span class="p">(</span><span class="n">current_contexts</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>First take a lock and then iterate over all of the nodes.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeForest</span><span class="o">::</span><span class="n">resize_node_contexts</span><span class="p">(</span><span class="kt">unsigned</span> <span class="n">total_contexts</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// We&#39;re only reading the maps of nodes, so we only need read permissions</span>
+      <span class="n">AutoLock</span> <span class="n">l_lock</span><span class="p">(</span><span class="n">lookup_lock</span><span class="p">,</span><span class="mi">1</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*exclusive*/</span><span class="p">);</span>
+      <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">LogicalRegion</span><span class="p">,</span><span class="n">RegionNode</span><span class="o">*&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+            <span class="n">region_nodes</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">region_nodes</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="o">-&gt;</span><span class="n">reserve_contexts</span><span class="p">(</span><span class="n">total_contexts</span><span class="p">);</span>
+      <span class="p">}</span>
+      <span class="k">for</span> <span class="p">(</span><span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">LogicalPartition</span><span class="p">,</span><span class="n">PartitionNode</span><span class="o">*&gt;::</span><span class="n">const_iterator</span> <span class="n">it</span> <span class="o">=</span> 
+            <span class="n">part_nodes</span><span class="p">.</span><span class="n">begin</span><span class="p">();</span> <span class="n">it</span> <span class="o">!=</span> <span class="n">part_nodes</span><span class="p">.</span><span class="n">end</span><span class="p">();</span> <span class="n">it</span><span class="o">++</span><span class="p">)</span>
+      <span class="p">{</span>
+        <span class="n">it</span><span class="o">-&gt;</span><span class="n">second</span><span class="o">-&gt;</span><span class="n">reserve_contexts</span><span class="p">(</span><span class="n">total_contexts</span><span class="p">);</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>For each node <code>reserve_contexts</code> does the resize operation.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">RegionTreeNode</span><span class="o">::</span><span class="n">reserve_contexts</span><span class="p">(</span><span class="kt">unsigned</span> <span class="n">num_contexts</span><span class="p">)</span>
+    <span class="p">{</span>
+      <span class="c1">// Hold the lock to prevent races on multiple people</span>
+      <span class="c1">// trying to update the reserve size.</span>
+      <span class="c1">// Also since deques don&#39;t copy objects when</span>
+      <span class="c1">// appending new ones, we can add states without affecting the</span>
+      <span class="c1">// already existing ones.</span>
+      <span class="n">AutoLock</span> <span class="n">n_lock</span><span class="p">(</span><span class="n">node_lock</span><span class="p">);</span>
+
+      <span class="n">logical_states</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">num_contexts</span><span class="p">);</span>
+      <span class="n">physical_states</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="n">num_contexts</span><span class="p">);</span>
+
+      <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="n">physical_states</span><span class="p">.</span><span class="n">size</span><span class="p">()</span><span class="o">-</span><span class="n">num_contexts</span><span class="p">;</span> 
+            <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">physical_states</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+        <span class="n">physical_states</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">PhysicalState</span><span class="p">(</span><span class="n">idx</span><span class="p">);</span>
+    <span class="p">}</span>
+</code></pre></div>
+<p>The allocation of the context occurs in <code>launch_task</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">launch_task</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+    <span class="p">{</span>
+<span class="p">...</span>
+        <span class="c1">// If we&#39;re a leaf task and we have virtual mappings</span>
+        <span class="c1">// then it&#39;s possible for the application to do inline</span>
+        <span class="c1">// mappings which require a physical context</span>
+        <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">chosen_variant</span><span class="p">.</span><span class="n">leaf</span> <span class="o">||</span> <span class="p">(</span><span class="n">num_virtual_mappings</span> <span class="o">&gt;</span> <span class="mi">0</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="c1">// Request a context from the runtime</span>
+          <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">allocate_context</span><span class="p">(</span><span class="k">this</span><span class="p">);</span>
+</code></pre></div>
+<p>Now we&#39;ll look back at the logical and physical state objects that are tracked by the nodes in the region tree. These are <code>LogicalState</code> and <code>PhysicalState</code>. In the logical state structure the field state list tracks the children that are open below the corresponding node that the state is stored in. The field mask tracks where simultaneous coherence has been used in the tree. There are other things here we&#39;ll cover in later classes.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">struct</span> <span class="n">LogicalState</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">LogicalState</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+      <span class="n">LogicalState</span><span class="p">(</span><span class="k">const</span> <span class="n">LogicalState</span> <span class="o">&amp;</span><span class="n">state</span><span class="p">);</span>
+      <span class="o">~</span><span class="n">LogicalState</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">LogicalState</span><span class="o">&amp;</span> <span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span> <span class="n">LogicalState</span> <span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+      <span class="kt">void</span><span class="o">*</span> <span class="k">operator</span> <span class="nf">new</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">count</span><span class="p">);</span>
+      <span class="kt">void</span><span class="o">*</span> <span class="k">operator</span> <span class="k">new</span><span class="p">[](</span><span class="kt">size_t</span> <span class="n">count</span><span class="p">);</span>
+      <span class="kt">void</span> <span class="k">operator</span> <span class="nf">delete</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+      <span class="kt">void</span> <span class="k">operator</span> <span class="k">delete</span><span class="p">[](</span><span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="kt">void</span> <span class="n">reset</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">FieldState</span><span class="p">,</span>
+                 <span class="n">LOGICAL_FIELD_STATE_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">field_states</span><span class="p">;</span>
+      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span><span class="n">CURR_LOGICAL_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> 
+                                                            <span class="n">curr_epoch_users</span><span class="p">;</span>
+      <span class="n">LegionList</span><span class="o">&lt;</span><span class="n">LogicalUser</span><span class="p">,</span><span class="n">PREV_LOGICAL_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> 
+                                                            <span class="n">prev_epoch_users</span><span class="p">;</span>
+      <span class="c1">// Fields on which the user has </span>
+      <span class="c1">// asked for explicit coherence</span>
+      <span class="n">FieldMask</span> <span class="n">user_level_coherence</span><span class="p">;</span>
+    <span class="p">};</span>
+</code></pre></div>
+<p>The physical state also tracks a lot of information like which data is dirty.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">    <span class="k">struct</span> <span class="n">PhysicalState</span> <span class="p">{</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">PhysicalState</span><span class="p">(</span><span class="kt">void</span><span class="p">);</span>
+      <span class="n">PhysicalState</span><span class="p">(</span><span class="n">ContextID</span> <span class="n">ctx</span><span class="p">);</span>
+<span class="cp">#ifdef DEBUG_HIGH_LEVEL</span>
+      <span class="n">PhysicalState</span><span class="p">(</span><span class="n">ContextID</span> <span class="n">ctx</span><span class="p">,</span> <span class="n">RegionTreeNode</span> <span class="o">*</span><span class="n">node</span><span class="p">);</span>
+<span class="cp">#endif</span>
+      <span class="n">PhysicalState</span><span class="p">(</span><span class="k">const</span> <span class="n">PhysicalState</span> <span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">PhysicalState</span><span class="o">&amp;</span> <span class="k">operator</span><span class="o">=</span><span class="p">(</span><span class="k">const</span> <span class="n">PhysicalState</span> <span class="o">&amp;</span><span class="n">rhs</span><span class="p">);</span>
+      <span class="kt">void</span><span class="o">*</span> <span class="k">operator</span> <span class="nf">new</span><span class="p">(</span><span class="kt">size_t</span> <span class="n">count</span><span class="p">);</span>
+      <span class="kt">void</span><span class="o">*</span> <span class="k">operator</span> <span class="k">new</span><span class="p">[](</span><span class="kt">size_t</span> <span class="n">count</span><span class="p">);</span>
+      <span class="kt">void</span> <span class="k">operator</span> <span class="nf">delete</span><span class="p">(</span><span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+      <span class="kt">void</span> <span class="k">operator</span> <span class="k">delete</span><span class="p">[](</span><span class="kt">void</span> <span class="o">*</span><span class="n">ptr</span><span class="p">);</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">FieldMask</span> <span class="n">dirty_mask</span><span class="p">;</span>
+      <span class="n">FieldMask</span> <span class="n">reduction_mask</span><span class="p">;</span>
+      <span class="n">FieldMask</span> <span class="n">remote_mask</span><span class="p">;</span> <span class="c1">// which fields are valid remote copies</span>
+      <span class="n">ChildState</span> <span class="n">children</span><span class="p">;</span>
+      <span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">InstanceView</span><span class="o">*</span><span class="p">,</span> <span class="n">FieldMask</span><span class="p">,</span>
+                <span class="n">VALID_VIEW_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">valid_views</span><span class="p">;</span>
+      <span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">ReductionView</span><span class="o">*</span><span class="p">,</span> <span class="n">FieldMask</span><span class="p">,</span>
+                <span class="n">VALID_REDUCTION_ALLOC</span><span class="o">&gt;::</span><span class="n">track_aligned</span> <span class="n">reduction_views</span><span class="p">;</span>
+      <span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">MaterializedView</span><span class="o">*</span><span class="p">,</span> <span class="n">LegionMap</span><span class="o">&lt;</span><span class="n">Event</span><span class="p">,</span><span class="n">FieldMask</span><span class="o">&gt;::</span><span class="n">aligned</span><span class="p">,</span>
+                <span class="n">PENDING_UPDATES_ALLOC</span><span class="o">&gt;::</span><span class="n">tracked</span> <span class="n">pending_updates</span><span class="p">;</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="c1">// These are used for managing access to the physical state</span>
+      <span class="kt">unsigned</span> <span class="n">acquired_count</span><span class="p">;</span>
+      <span class="kt">bool</span> <span class="n">exclusive</span><span class="p">;</span>
+      <span class="n">std</span><span class="o">::</span><span class="n">deque</span><span class="o">&lt;</span><span class="n">std</span><span class="o">::</span><span class="n">pair</span><span class="o">&lt;</span><span class="n">UserEvent</span><span class="p">,</span><span class="kt">bool</span><span class="cm">/*exclusive*/</span><span class="o">&gt;</span> <span class="o">&gt;</span> <span class="n">requests</span><span class="p">;</span>
+    <span class="k">public</span><span class="o">:</span>
+      <span class="n">ContextID</span> <span class="n">ctx</span><span class="p">;</span>
+<span class="cp">#ifdef DEBUG_HIGH_LEVEL</span>
+      <span class="n">RegionTreeNode</span> <span class="o">*</span><span class="n">node</span><span class="p">;</span>
+<span class="cp">#endif</span>
+    <span class="p">};</span> 
+</code></pre></div>
+<p>Notice the <code>LegionStack</code> and <code>LegionList</code> structures. These are wrappers around stl structures from the standard library that have special features like tracking memory usage. All of these are defined in <code>legion_allocation.h</code>.</p>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

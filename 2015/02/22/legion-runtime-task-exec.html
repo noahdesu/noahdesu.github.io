@@ -1,0 +1,517 @@
+<!DOCTYPE html>
+<html>
+
+  <head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Legion Runtime Class #8: Task Types and Execution</title>
+  <meta name="description" content="About Legion Runtime Class">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2015/02/22/legion-runtime-task-exec.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+</head>
+
+
+  <body>
+
+    <header class="site-header">
+
+  <div class="wrapper">
+
+    <a class="site-title" href="/">makedist</a>
+
+    <nav class="site-nav">
+      <a href="#" class="menu-icon">
+        <svg viewBox="0 0 18 15">
+          <path fill="#424242" d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z"/>
+          <path fill="#424242" d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z"/>
+          <path fill="#424242" d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z"/>
+        </svg>
+      </a>
+
+      <div class="trigger">
+        
+          
+        
+          
+        
+          
+          <a class="page-link" href="/legion.html">Legion</a>
+          
+        
+          
+        
+          
+        
+      </div>
+    </nav>
+
+  </div>
+
+</header>
+
+
+    <div class="page-content">
+      <div class="wrapper">
+        <div class="post">
+
+  <header class="post-header">
+    <h1 class="post-title">Legion Runtime Class #8: Task Types and Execution</h1>
+    <p class="post-meta">Feb 22, 2015
+    </p>
+    <a href="https://twitter.com/share" class="twitter-share-button"{count} data-via="noahdesu">Tweet</a><script>!function(d,s,id){var js,fjs=d.getElementsByTagName(s)[0],p=/^http:/.test(d.location)?'http':'https';if(!d.getElementById(id)){js=d.createElement(s);js.id=id;js.src=p+'://platform.twitter.com/widgets.js';fjs.parentNode.insertBefore(js,fjs);}}(document, 'script', 'twitter-wjs');</script>
+  </header>
+
+  <article class="post-content">
+    <h1>About Legion Runtime Class</h1>
+
+<p>These notes are closely based on the set
+of <a href="http://www.youtube.com/playlist?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG">Legion Runtime
+Class</a>
+videos produced by the <a href="http://legion.stanford.edu">Legion</a> developers. They are my own notes and code walks, and any
+errors or things that are just plain wrong represent my own mistakes.</p>
+
+<p>Today&#39;s notes are based on the following video:</p>
+
+<iframe width="560" height="315" src="https://www.youtube.com/embed/qbyRxe0t5hM?list=PLUNK9XcztK7xjXfppL9hIpVv2ukp7A4tG" frameborder="0" allowfullscreen></iframe>
+
+<h2>Overview</h2>
+
+<p>This class will discuss how application-level tasks execute, wrapping up much of the control structures for the high-level runtime.</p>
+
+<h2>Task Types</h2>
+
+<p>All tasks are instances of <code>Operation</code> and move through the pipeline stages. Tasks are of type <code>TaskOp</code> and are a direct subclass of <code>SpeculativeOp</code>. Task operations are defined in <code>legion_task.h</code>.</p>
+
+<ul>
+<li>The <code>TaskOp</code> operation is an abstract class that extends <code>SpeculativeOp</code>. All tasks are of type <code>TaskOp</code>.</li>
+<li>The <code>SingleTask</code> type is a <code>TaskOp</code> and represents a single application-level task running at some point in time. The <code>Context</code> we have seen is a typedef of <code>SingleTask*</code>.</li>
+<li>The <code>MultiTask</code> is a <code>TaskOp</code> and is a special task that represents a collection of <code>SingleTask</code>s.</li>
+<li>An <code>IndividualTask</code> is a <code>SingleTask</code> and is created when a single task is launched.</li>
+<li>The <code>PointTask</code> is a <code>SingleTask</code> and is designed to operate within the context of an index space launch where each point in the space represents a task.</li>
+<li>A <code>WrapperTask</code> is a <code>SingleTask</code>. A wrapper task is used to represent a task that should actually progress through the pipeline. Examples include:
+
+<ul>
+<li>A <code>RemoteTask</code> is a proxy that tracks a remote task (e.g. a parent task).</li>
+<li>An <code>InlineTask</code> executes directly within a parent context and shares its resources.</li>
+</ul></li>
+<li>An <code>IndexTask</code> is a <code>MultiTask</code> and is used during an index space launch.</li>
+<li>A <code>SliceTask</code> is a <code>MultiTask</code> that represents a domain slice specified by a mapper via the <code>slice_domain</code> interface.</li>
+</ul>
+
+<h2>Task Execution</h2>
+
+<p>Most tasks implement the standard set of callbacks for the operational pipeline stages (e.g. dependence analysis), just like other operations that we have seen such as <code>CopyOp</code> or <code>MapOp</code>. Things become more interesting for task operations when we look at the <code>trigger_execution</code> phase that is called once a task is ready to map.</p>
+
+<p>The first thing that is done in <code>trigger_execution</code> for a <code>SingleTask</code> is that the runtime checks to see if the task is running remotely or locally on the original node. We are going to look at the local case first, so we&#39;ll come back to the remote case.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">trigger_execution</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">bool</span> <span class="n">success</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">is_remote</span><span class="p">())</span>
+  <span class="p">{</span>
+    <span class="c1">// this case covered below.</span>
+</code></pre></div>
+<p>Here we are in the local case. This means that the task is running on the original processor that it was launched from. First we check to see if the task has been premapped. If this fails then at the bottom of <code>trigger_execution</code> we end up returning false to the caller indicating that we failed, and the runtime will then restart the task later. We&#39;ll also skip the <code>must_epoch</code> case today:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">else</span> <span class="c1">// !is_remote()</span>
+  <span class="p">{</span>
+    <span class="c1">// Not remote</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">is_premapped</span><span class="p">()</span> <span class="o">||</span> <span class="n">premap_task</span><span class="p">())</span>
+    <span class="p">{</span>
+      <span class="c1">// See if we have a must epoch in which case</span>
+      <span class="c1">// we can simply record ourselves and we are done</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">must_epoch</span> <span class="o">!=</span> <span class="nb">NULL</span><span class="p">)</span>
+        <span class="n">must_epoch</span><span class="o">-&gt;</span><span class="n">register_single_task</span><span class="p">(</span><span class="k">this</span><span class="p">,</span> <span class="n">must_epoch_index</span><span class="p">);</span>
+      <span class="k">else</span>
+</code></pre></div>
+<p>So in the common case premapping is complete, and we look to see if the mapper has requested that the task be mapped locally. If this is the case and the target processor is remote then we perform the mapping locally and call <code>distribute_task</code> to send the task to a remote node. Note that it is valid for a task to map on a node other than where it is executed, hence the logic:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="p">{</span>
+        <span class="c1">// See if this task is going to be sent</span>
+        <span class="c1">// remotely in which case we need to do the</span>
+        <span class="c1">// mapping now, otherwise we can defer it</span>
+        <span class="c1">// until the task ends up on the target processor</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">is_locally_mapped</span><span class="p">()</span> <span class="o">&amp;&amp;</span> <span class="o">!</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">is_local</span><span class="p">(</span><span class="n">target_proc</span><span class="p">))</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">perform_mapping</span><span class="p">())</span>
+          <span class="p">{</span>
+              <span class="n">distribute_task</span><span class="p">();</span>
+          <span class="p">}</span>
+          <span class="k">else</span> <span class="c1">// failed to map</span>
+            <span class="n">success</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span> 
+        <span class="p">}</span>
+</code></pre></div>
+<p>In the next case the mapper hasn&#39;t requested a local mapping, so we need to either send it away or map and run it locally. The <code>distribute_task</code> call with return true if the task is targeted to the current processor and return true. It will return false if it is sent to a different processor. When it is local, the mapping is completed and the task is launched.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">        <span class="k">else</span>
+        <span class="p">{</span>
+          <span class="k">if</span> <span class="p">(</span><span class="n">distribute_task</span><span class="p">())</span>
+          <span class="p">{</span>
+            <span class="c1">// Still local so try mapping and launching</span>
+            <span class="k">if</span> <span class="p">(</span><span class="n">perform_mapping</span><span class="p">())</span>
+            <span class="p">{</span>
+              <span class="c1">// Still local and mapped so</span>
+              <span class="c1">// we can now launch it</span>
+              <span class="n">launch_task</span><span class="p">();</span>
+            <span class="p">}</span>
+            <span class="k">else</span> <span class="c1">// failed to map</span>
+              <span class="n">success</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+          <span class="p">}</span>
+        <span class="p">}</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="k">else</span> <span class="c1">// failed to premap</span>
+      <span class="n">success</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="p">}</span>
+
+  <span class="k">return</span> <span class="n">success</span><span class="p">;</span>
+<span class="p">}</span> 
+</code></pre></div>
+<p>Whenever a task is launched the runtime always executes this local path in <code>trigger_execution</code>. The case where a task is executing remotely is always a result of the machinery in <code>distribute_task</code> sending the task away where it will be injected into the operational pipeline of a runtime on another node.</p>
+
+<p>Here is the <code>distributed_task</code> call that will send the task to a different target processor:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">IndividualTask</span><span class="o">::</span><span class="n">distribute_task</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">target_proc</span> <span class="o">!=</span> <span class="n">current_proc</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_task</span><span class="p">(</span><span class="n">target_proc</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+    <span class="k">return</span> <span class="nb">false</span><span class="p">;</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="nb">true</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>The first thing that happens in <code>send_task</code> is to check if the target processor is a processor on the local node. If it is then things are simple; the task is added to the ready queue where eventually it will be chosen and <code>trigger_execution</code> will occur and we&#39;ll be right back where we started.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">send_task</span><span class="p">(</span><span class="n">Processor</span> <span class="n">target</span><span class="p">,</span> <span class="n">TaskOp</span> <span class="o">*</span><span class="n">task</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Check to see if the target processor is still local </span>
+  <span class="n">std</span><span class="o">::</span><span class="n">map</span><span class="o">&lt;</span><span class="n">Processor</span><span class="p">,</span><span class="n">ProcessorManager</span><span class="o">*&gt;::</span><span class="n">const_iterator</span> <span class="n">finder</span> <span class="o">=</span> 
+      <span class="n">proc_managers</span><span class="p">.</span><span class="n">find</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">finder</span> <span class="o">!=</span> <span class="n">proc_managers</span><span class="p">.</span><span class="n">end</span><span class="p">())</span> <span class="p">{</span>
+    <span class="c1">// Update the current processor</span>
+    <span class="n">task</span><span class="o">-&gt;</span><span class="n">current_proc</span> <span class="o">=</span> <span class="n">target</span><span class="p">;</span>
+    <span class="n">finder</span><span class="o">-&gt;</span><span class="n">second</span><span class="o">-&gt;</span><span class="n">add_to_ready_queue</span><span class="p">(</span><span class="n">task</span><span class="p">,</span><span class="nb">false</span><span class="cm">/*previous failure*/</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>If the target processor is on a remote node then we package up the task and send it via the <code>MessegeManager</code> for the target processor. The manager contains a call <code>send_task</code> that handles task messages:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">else</span> <span class="p">{</span>
+    <span class="n">MessageManager</span> <span class="o">*</span><span class="n">manager</span> <span class="o">=</span> <span class="n">find_messenger</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+    <span class="n">Serializer</span> <span class="n">rez</span><span class="p">;</span>
+    <span class="kt">bool</span> <span class="n">deactivate_task</span><span class="p">;</span>
+    <span class="p">{</span>
+      <span class="n">RezCheck</span> <span class="n">z</span><span class="p">(</span><span class="n">rez</span><span class="p">);</span>
+      <span class="n">rez</span><span class="p">.</span><span class="n">serialize</span><span class="p">(</span><span class="n">target</span><span class="p">);</span>
+      <span class="n">rez</span><span class="p">.</span><span class="n">serialize</span><span class="p">(</span><span class="n">task</span><span class="o">-&gt;</span><span class="n">get_task_kind</span><span class="p">());</span>
+      <span class="n">deactivate_task</span> <span class="o">=</span> <span class="n">task</span><span class="o">-&gt;</span><span class="n">pack_task</span><span class="p">(</span><span class="n">rez</span><span class="p">,</span> <span class="n">target</span><span class="p">);</span>
+    <span class="p">}</span>
+    <span class="c1">// Put it on the queue and send it</span>
+    <span class="n">manager</span><span class="o">-&gt;</span><span class="n">send_task</span><span class="p">(</span><span class="n">rez</span><span class="p">,</span> <span class="nb">true</span><span class="cm">/*flush*/</span><span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">deactivate_task</span><span class="p">)</span>
+      <span class="n">task</span><span class="o">-&gt;</span><span class="n">deactivate</span><span class="p">();</span>
+  <span class="p">}</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>We&#39;ve seen bits of this before. The message manager packages up the task message and sends it out over the network.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">MessageManager</span><span class="o">::</span><span class="n">send_task</span><span class="p">(</span><span class="n">Serializer</span> <span class="o">&amp;</span><span class="n">rez</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">flush</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">package_message</span><span class="p">(</span><span class="n">rez</span><span class="p">,</span> <span class="n">TASK_MESSAGE</span><span class="p">,</span> <span class="n">flush</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>What we haven&#39;t seen yet is how these messages are handled on receipt. All of the message types are dispatched through the <code>handle_messages</code> call. For each of the messages being handled the type of message and a set of argument is decoded (omitted). Then a switch statement is used to select the action based on the message type. We&#39;ve clipped the entire method, but show the case <code>TASK_MESSAGE</code> which calls <code>Runtime::handle_task</code>.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">MessageManager</span><span class="o">::</span><span class="n">handle_messages</span><span class="p">(</span><span class="kt">unsigned</span> <span class="n">num_messages</span><span class="p">,</span>
+   <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">args</span><span class="p">,</span> <span class="kt">size_t</span> <span class="n">arglen</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">num_messages</span><span class="p">;</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+    <span class="n">MessageKind</span> <span class="n">kind</span> <span class="o">=</span> <span class="o">*</span><span class="p">((</span><span class="k">const</span> <span class="n">MessageKind</span><span class="o">*</span><span class="p">)</span><span class="n">args</span><span class="p">);</span>
+    <span class="n">args</span> <span class="o">+=</span> <span class="k">sizeof</span><span class="p">(</span><span class="n">kind</span><span class="p">);</span>
+    <span class="c1">// ... deconstruct message ...</span>
+    <span class="n">Deserializer</span> <span class="nf">derez</span><span class="p">(</span><span class="n">args</span><span class="p">,</span><span class="n">message_size</span><span class="p">);</span>
+    <span class="k">switch</span> <span class="p">(</span><span class="n">kind</span><span class="p">)</span> <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">TASK_MESSAGE</span><span class="p">:</span>
+    <span class="p">{</span>
+      <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">handle_task</span><span class="p">(</span><span class="n">derez</span><span class="p">);</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>Let&#39;s jump now to <code>handle_task</code>:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">Runtime</span><span class="o">::</span><span class="n">handle_task</span><span class="p">(</span><span class="n">Deserializer</span> <span class="o">&amp;</span><span class="n">derez</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="n">TaskOp</span><span class="o">::</span><span class="n">process_unpack_task</span><span class="p">(</span><span class="k">this</span><span class="p">,</span> <span class="n">derez</span><span class="p">);</span>
+<span class="p">}</span>
+</code></pre></div>
+<p>So the <code>TaskOp</code> knows how to deserialize itself. We&#39;ve been following the single task case today, so for that type of task as soon as it is deserialized into a local task operation structure it is put onto the ready queue. Remember we are on the remote side now, so it is placed into the pipeline on the remote node&#39;s runtime where it will be picked up and make it back to <code>trigger_execution</code>, but this time for the case that the task is running remotely.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">TaskOp</span><span class="o">::</span><span class="n">process_unpack_task</span><span class="p">(</span><span class="n">Runtime</span> <span class="o">*</span><span class="n">rt</span><span class="p">,</span> <span class="n">Deserializer</span> <span class="o">&amp;</span><span class="n">derez</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Figure out what kind of task this is and where it came from</span>
+  <span class="n">DerezCheck</span> <span class="n">z</span><span class="p">(</span><span class="n">derez</span><span class="p">);</span>
+  <span class="n">Processor</span> <span class="n">current</span><span class="p">;</span>
+  <span class="n">derez</span><span class="p">.</span><span class="n">deserialize</span><span class="p">(</span><span class="n">current</span><span class="p">);</span>
+  <span class="n">TaskKind</span> <span class="n">kind</span><span class="p">;</span>
+  <span class="n">derez</span><span class="p">.</span><span class="n">deserialize</span><span class="p">(</span><span class="n">kind</span><span class="p">);</span>
+  <span class="k">switch</span> <span class="p">(</span><span class="n">kind</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="k">case</span> <span class="nl">INDIVIDUAL_TASK_KIND</span><span class="p">:</span>
+    <span class="p">{</span>
+      <span class="n">IndividualTask</span> <span class="o">*</span><span class="n">task</span> <span class="o">=</span> <span class="n">rt</span><span class="o">-&gt;</span><span class="n">get_available_individual_task</span><span class="p">();</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">task</span><span class="o">-&gt;</span><span class="n">unpack_task</span><span class="p">(</span><span class="n">derez</span><span class="p">,</span> <span class="n">current</span><span class="p">))</span>
+        <span class="n">rt</span><span class="o">-&gt;</span><span class="n">add_to_ready_queue</span><span class="p">(</span><span class="n">current</span><span class="p">,</span> <span class="n">task</span><span class="p">,</span> <span class="nb">false</span><span class="cm">/*prev fail*/</span><span class="p">);</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+<span class="p">...</span>
+</code></pre></div>
+<p>So this task will now pop back out in <code>trigger_execution</code> eventually and <code>is_remote()</code> will evaluate to true. The first thing we do in this case is give the runtime and mapper the opportunity to redistribute the task. It is important to note this, because tasks in Legion can move around arbitrarily, including back to the original node. And in the case that it is redistributed to the original node the machinery will ensure that eventually it executes the local case again.</p>
+
+<p>If the task will execute on the remote node then we optionally map the task (if it wasn&#39;t already mapped) and then launch it.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">trigger_execution</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="kt">bool</span> <span class="n">success</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">is_remote</span><span class="p">())</span>
+  <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">distribute_task</span><span class="p">())</span>
+    <span class="p">{</span>
+      <span class="c1">// Still local</span>
+      <span class="k">if</span> <span class="p">(</span><span class="n">is_locally_mapped</span><span class="p">())</span>
+      <span class="p">{</span>
+        <span class="c1">// Remote and locally mapped means</span>
+        <span class="c1">// we were already mapped so we can</span>
+        <span class="c1">// just launch the task</span>
+        <span class="n">launch_task</span><span class="p">();</span>
+      <span class="p">}</span>
+      <span class="k">else</span>
+      <span class="p">{</span>
+        <span class="c1">// Remote but still need to map</span>
+        <span class="k">if</span> <span class="p">(</span><span class="n">perform_mapping</span><span class="p">())</span>
+        <span class="p">{</span>
+          <span class="n">launch_task</span><span class="p">();</span>
+        <span class="p">}</span>
+        <span class="k">else</span> <span class="c1">// failed to map</span>
+          <span class="n">success</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+      <span class="p">}</span>
+    <span class="p">}</span>
+    <span class="c1">// otherwise it was sent away</span>
+  <span class="p">}</span>
+</code></pre></div>
+<h2><code>perform_mapping</code></h2>
+
+<p>The <code>perform_mapping</code> call seen above in <code>trigger_execution</code> is what completes the mapping stage of the pipeline for the individual task operation. The first thing that is done is to ask the mapper which variant of the task should be run (e.g. CPU or GPU implementations). After that <code>map_all_regions</code> is called which is responsible for mapping data into physical instances for the task. Next if we mapped successfully we mark some state that indicates we cannot be stolen now, and then send a message back to the owning node (if we are remote) that announces where we ended up mapping. We won&#39;t talk today about virtual mappings or invalidations. Finally <code>complete_mapping</code> call is made, which as we have seen before, is a method on the <code>Operation</code> base class that marks the completion of the mapping stage of the pipeline.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">IndividualTask</span><span class="o">::</span><span class="n">perform_mapping</span><span class="p">(</span><span class="kt">bool</span> <span class="n">mapper_invoked</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// Before we try mapping the task, ask the mapper to pick a task variant</span>
+  <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">invoke_mapper_select_variant</span><span class="p">(</span><span class="n">current_proc</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+
+  <span class="c1">// Now try to do the mapping, we can just use our completion</span>
+  <span class="c1">// event since we know this task will object will be active</span>
+  <span class="c1">// throughout the duration of the computation</span>
+  <span class="kt">bool</span> <span class="n">map_success</span> <span class="o">=</span> <span class="n">map_all_regions</span><span class="p">(</span><span class="n">target_proc</span><span class="p">,</span> <span class="n">get_task_completion</span><span class="p">(),</span> <span class="n">mapper_invoked</span><span class="p">);</span>
+
+  <span class="c1">// If we mapped, then we are no longer stealable</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">map_success</span><span class="p">)</span>
+    <span class="n">spawn_task</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+
+  <span class="c1">// If we succeeded in mapping and everything was mapped</span>
+  <span class="c1">// then we get to mark that we are done mapping</span>
+  <span class="k">if</span> <span class="p">(</span><span class="n">map_success</span> <span class="o">&amp;&amp;</span> <span class="p">(</span><span class="n">num_virtual_mappings</span> <span class="o">==</span> <span class="mi">0</span><span class="p">))</span> <span class="p">{</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">is_remote</span><span class="p">())</span> <span class="p">{</span>
+      <span class="c1">// Send back the message saying that we finished mapping</span>
+      <span class="n">Serializer</span> <span class="n">rez</span><span class="p">;</span>
+      <span class="n">pack_remote_mapped</span><span class="p">(</span><span class="n">rez</span><span class="p">);</span>
+      <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">send_individual_remote_mapped</span><span class="p">(</span><span class="n">orig_proc</span><span class="p">,</span> <span class="n">rez</span><span class="p">);</span>
+    <span class="p">}</span> <span class="k">else</span>
+      <span class="n">issue_invalidations</span><span class="p">(</span><span class="n">runtime</span><span class="o">-&gt;</span><span class="n">address_space</span><span class="p">,</span> <span class="nb">false</span><span class="cm">/*remote*/</span><span class="p">);</span>
+
+    <span class="c1">// Mark that we have completed mapping</span>
+    <span class="n">complete_mapping</span><span class="p">();</span>
+  <span class="p">}</span>
+  <span class="k">return</span> <span class="n">map_success</span><span class="p">;</span>
+<span class="p">}</span>
+</code></pre></div>
+<h2><code>map_all_regions</code></h2>
+
+<p>The most important bits in <code>perform_mapping</code> are found in <code>map_all_regions</code>. This is a generic call implemented on the <code>SingleTask</code> object and is used for all tasks to map different region requirements that were requested for the task. I&#39;ve trimmed out a lot of the bits to show just the relevant parts for this discussion. The first thing that happens is that we ask the mapper to pick a ranking of memories for the physical mappings.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">bool</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">map_all_regions</span><span class="p">(</span><span class="n">Processor</span> <span class="n">target</span><span class="p">,</span> <span class="n">Event</span> <span class="n">user_event</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">mapper_invoked</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// ...</span>
+  <span class="k">if</span> <span class="p">(</span><span class="o">!</span><span class="n">mapper_invoked</span><span class="p">)</span>
+    <span class="n">notify</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">invoke_mapper_map_task</span><span class="p">(</span><span class="n">current_proc</span><span class="p">,</span> <span class="k">this</span><span class="p">);</span>
+</code></pre></div>
+<p>Next we start looping over all of the region requirements for the task. There are several cases that are not shown here such as checking to see if the region is already mapped, and if not the region forest is asked to create a mapping which returns a reference. If there was a failure we break out of the loop and clean-up any mapped regions we created because we can&#39;t launch the task until all regions are mapped successfully.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">regions</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="c1">// ...</span>
+
+    <span class="c1">// Otherwise we&#39;re going to do an actual mapping</span>
+    <span class="n">mapping_refs</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">forest</span><span class="o">-&gt;</span><span class="n">map_physical_region</span><span class="p">(</span>
+        <span class="n">enclosing_physical_contexts</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+        <span class="n">mapping_paths</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+        <span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+        <span class="n">idx</span><span class="p">,</span>
+        <span class="k">this</span><span class="p">,</span>
+        <span class="n">current_proc</span><span class="p">,</span>
+        <span class="n">target</span>
+<span class="p">);</span>
+    <span class="k">if</span> <span class="p">(</span><span class="n">mapping_refs</span><span class="p">[</span><span class="n">idx</span><span class="p">].</span><span class="n">has_ref</span><span class="p">()</span> <span class="o">||</span> <span class="n">IS_NO_ACCESS</span><span class="p">(</span><span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">]))</span>
+    <span class="p">{</span>
+      <span class="n">virtual_mapped</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+    <span class="p">}</span>
+    <span class="k">else</span>
+    <span class="p">{</span>
+      <span class="c1">// Otherwise the mapping failed so break out</span>
+      <span class="n">map_success</span> <span class="o">=</span> <span class="nb">false</span><span class="p">;</span>
+      <span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">].</span><span class="n">mapping_failed</span> <span class="o">=</span> <span class="nb">true</span><span class="p">;</span>
+      <span class="k">break</span><span class="p">;</span>
+    <span class="p">}</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>When we succeed mapping, we register the task as a user of the region which will ensure that all of the physical instances are updated with valid data.</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">      <span class="n">physical_instances</span><span class="p">[</span><span class="n">idx</span><span class="p">]</span> <span class="o">=</span> 
+        <span class="n">runtime</span><span class="o">-&gt;</span><span class="n">forest</span><span class="o">-&gt;</span><span class="n">register_physical_region</span><span class="p">(</span>
+            <span class="n">enclosing_physical_contexts</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+            <span class="n">mapping_refs</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+            <span class="n">regions</span><span class="p">[</span><span class="n">idx</span><span class="p">],</span>
+            <span class="n">idx</span><span class="p">,</span>
+            <span class="k">this</span><span class="p">,</span>
+            <span class="n">current_proc</span><span class="p">,</span>
+            <span class="n">user_event</span><span class="p">);</span>
+</code></pre></div>
+<p>There is a lot more to this method, such as additional mapper notifications of failure and success scenarios. If everything worked out we return success to the caller. We&#39;ll return to this function in later classes.</p>
+
+<h2><code>launch_task</code></h2>
+
+<p>The final method from <code>trigger_execution</code> that we&#39;ll look at is <code>launch_task</code>. This is called to launch <em>any</em> type of application task. This is a <em>huge</em> function, and we won&#39;t go into too much detail in this class. There are 3 major steps in the function:</p>
+
+<ol>
+<li><p>Compute the set of low-level event pre-conditions that must be met before the task can be launched. This is includes things such as:</p>
+
+<ul>
+<li>Regions have valid data</li>
+<li>Locks and reservations</li>
+<li>Futures have valid data</li>
+<li>Phase barriers</li>
+</ul>
+
+<p>All of these completion events are collected in <code>wait_on_events</code> structure:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++"><span class="kt">void</span> <span class="n">SingleTask</span><span class="o">::</span><span class="n">launch_task</span><span class="p">(</span><span class="kt">void</span><span class="p">)</span>
+<span class="p">{</span>
+  <span class="c1">// ...</span>
+  <span class="c1">// STEP 1: Compute the precondition for the task launch</span>
+  <span class="n">std</span><span class="o">::</span><span class="n">set</span><span class="o">&lt;</span><span class="n">Event</span><span class="o">&gt;</span> <span class="n">wait_on_events</span><span class="p">;</span>
+</code></pre></div>
+<p>We&#39;ll skip over all of the different types of pre-conditions, but here is an example of where the <code>Future</code> completion events are added to this set:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Now add get all the other preconditions for the launch</span>
+  <span class="k">for</span> <span class="p">(</span><span class="kt">unsigned</span> <span class="n">idx</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">idx</span> <span class="o">&lt;</span> <span class="n">futures</span><span class="p">.</span><span class="n">size</span><span class="p">();</span> <span class="n">idx</span><span class="o">++</span><span class="p">)</span>
+  <span class="p">{</span>
+    <span class="n">Future</span><span class="o">::</span><span class="n">Impl</span> <span class="o">*</span><span class="n">impl</span> <span class="o">=</span> <span class="n">futures</span><span class="p">[</span><span class="n">idx</span><span class="p">].</span><span class="n">impl</span><span class="p">;</span> 
+    <span class="n">wait_on_events</span><span class="p">.</span><span class="n">insert</span><span class="p">(</span><span class="n">impl</span><span class="o">-&gt;</span><span class="n">get_ready_event</span><span class="p">());</span>
+  <span class="p">}</span>
+</code></pre></div>
+<p>Once all of the pre-conditions are computed they are merged into a single events:</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="c1">// Merge together all the events for the start condition </span>
+  <span class="n">Event</span> <span class="n">start_condition</span> <span class="o">=</span> <span class="n">Event</span><span class="o">::</span><span class="n">merge_events</span><span class="p">(</span><span class="n">wait_on_events</span><span class="p">);</span>
+</code></pre></div></li>
+<li><p>The second step is construct the context for the task which includes the structures that are used to track all of the sub-operations that might be launched by the task.</p></li>
+<li><p>The final step is to launch the task with the pre-conditions that were computed</p>
+<div class="highlight"><pre><code class="language-c++" data-lang="c++">  <span class="n">Event</span> <span class="n">task_launch_event</span> <span class="o">=</span> <span class="n">launch_processor</span><span class="p">.</span><span class="n">spawn</span><span class="p">(</span><span class="n">low_id</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">proxy_this</span><span class="p">,</span>
+               <span class="k">sizeof</span><span class="p">(</span><span class="n">proxy_this</span><span class="p">),</span> <span class="n">start_condition</span><span class="p">,</span> <span class="n">task_priority</span><span class="p">);</span>
+</code></pre></div></li>
+</ol>
+
+  </article>
+
+  <section id="disqus_thread"></section>
+
+<script type="text/javascript">
+    /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+    var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function() {
+        var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+        dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+        (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+    })();
+    /* * * DON'T EDIT BELOW THIS LINE * * */
+    (function () {
+        var s = document.createElement('script'); s.async = true;
+        s.type = 'text/javascript';
+        s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+        (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+    }());
+</script>
+<noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by Disqus.</a></noscript>
+<a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+</div>
+
+      </div>
+    </div>
+
+    <footer class="site-footer">
+
+  <div class="wrapper">
+
+    <h2 class="footer-heading">makedist</h2>
+
+    <div class="footer-col-wrapper">
+      <div class="footer-col  footer-col-1">
+        <ul class="contact-list">
+          <li>makedist</li>
+          <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-2">
+        <ul class="social-media-list">
+          
+          <li>
+            <a href="https://github.com/noahdesu">
+              <span class="icon  icon--github">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+
+          
+          <li>
+            <a href="https://twitter.com/noahdesu">
+              <span class="icon  icon--twitter">
+                <svg viewBox="0 0 16 16">
+                  <path fill="#828282" d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z"/>
+                </svg>
+              </span>
+
+              <span class="username">noahdesu</span>
+            </a>
+          </li>
+          
+        </ul>
+      </div>
+
+      <div class="footer-col  footer-col-3">
+        <p class="text">Notes on programming, research, and other interests.
+</p>
+      </div>
+    </div>
+
+  </div>
+
+</footer>
+
+
+<script>
+  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+  (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+  m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+  })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+  ga('create', 'UA-37966177-1', 'auto');
+  ga('send', 'pageview');
+</script>
+
+  </body>
+
+</html>

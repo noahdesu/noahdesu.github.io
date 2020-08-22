@@ -1,0 +1,816 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="X-UA-Compatible" content="IE=edge">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+
+  <title>Zlog: A shared-log on RADOS</title>
+  <meta name="description"
+    content="Distributed logs have been receiving a lot of attention lately.  Andrightfully so---as a building block, they are a basic concept that in manyinstances can s...">
+
+  <link rel="stylesheet" href="/css/main.css">
+  <link rel="stylesheet" href="/css/bootstrap-combined.min.css">
+  <link rel="canonical" href="http://noahdesu.github.io/2014/10/26/corfu-on-ceph.html">
+  <link rel="alternate" type="application/rss+xml" title="makedist" href="http://noahdesu.github.io/feed.xml" />
+  <script src="/js/tabcordion.js"></script>
+  <script src="/js/bootstrap.min.js"></script>
+  <script src="//ajax.googleapis.com/ajax/libs/jquery/1.7.2/jquery.min.js"></script>
+  <script src="//netdna.bootstrapcdn.com/twitter-bootstrap/2.3.2/js/bootstrap.min.js"></script>
+  <script>
+    $(function() {
+        $('.tabcordion').tabcordion()
+    });
+</script>
+<script>
+  $(document).on('click', 'a.resize', function() {
+      $cn = $('.container');
+      var width = 600,
+          onComplete;
+      if (!$cn.data('fullWidth')) {
+          $cn.data('fullWidth', $cn.width());
+          $cn.css('maxWidth', $cn.width());
+      } else {
+          width = $cn.data('fullWidth');
+          $cn.data('fullWidth', null);
+          onComplete = function() {
+              $cn.css('maxWidth', null);
+          };
+      }
+      $cn.animate({
+          maxWidth: width
+      }, {
+          complete: onComplete
+      });
+      $(window).trigger('resize');
+      return false;
+  });
+</script>
+  
+</head>
+
+
+<body>
+
+  <header class="site-header">
+
+    <div class="wrapper">
+
+      <a class="site-title" href="/">makedist</a>
+
+      <nav class="site-nav">
+        <a href="#" class="menu-icon">
+          <svg viewBox="0 0 18 15">
+            <path fill="#424242"
+              d="M18,1.484c0,0.82-0.665,1.484-1.484,1.484H1.484C0.665,2.969,0,2.304,0,1.484l0,0C0,0.665,0.665,0,1.484,0 h15.031C17.335,0,18,0.665,18,1.484L18,1.484z" />
+            <path fill="#424242"
+              d="M18,7.516C18,8.335,17.335,9,16.516,9H1.484C0.665,9,0,8.335,0,7.516l0,0c0-0.82,0.665-1.484,1.484-1.484 h15.031C17.335,6.031,18,6.696,18,7.516L18,7.516z" />
+            <path fill="#424242"
+              d="M18,13.516C18,14.335,17.335,15,16.516,15H1.484C0.665,15,0,14.335,0,13.516l0,0 c0-0.82,0.665-1.484,1.484-1.484h15.031C17.335,12.031,18,12.696,18,13.516L18,13.516z" />
+          </svg>
+        </a>
+
+        <div class="trigger">
+        </div>
+      </nav>
+
+    </div>
+
+  </header>
+
+
+  <div class="page-content">
+    <div class="wrapper">
+      <div class="post">
+
+        <header class="post-header">
+          <h1 class="post-title">Zlog: A shared-log on RADOS</h1>
+          <p class="post-meta">Oct 26, 2014
+          </p>
+          <a href="https://twitter.com/share" class="twitter-share-button" {count} data-via="noahdesu">Tweet</a>
+          <script>!function (d, s, id) { var js, fjs = d.getElementsByTagName(s)[0], p = /^http:/.test(d.location) ? 'http' : 'https'; if (!d.getElementById(id)) { js = d.createElement(s); js.id = id; js.src = p + '://platform.twitter.com/widgets.js'; fjs.parentNode.insertBefore(js, fjs); } }(document, 'script', 'twitter-wjs');</script>
+        </header>
+
+        <article>
+          <p>Distributed logs have been receiving a lot of attention lately. And
+            rightfully so—as a building block, they are a basic concept that in many
+            instances can simplify the construction of distributed systems. But building a
+            distributed log is no simple task. In this post I will share the design of
+            <a href="https://github.com/cruzdb/zlog">zlog</a>, our implementation of a globally consistent distributed
+            log on
+            top of <a href="https://ceph.com">Ceph</a>. The implementation of <a
+              href="https://github.com/cruzdb/zlog">zlog</a> is based on the novel <a
+              href="https://www.usenix.org/conference/nsdi12/technical-sessions/presentation/balakrishnan">CORFU
+              protocol</a> for building high-performance distributed shared-logs.</p>
+          <p>A complete discussion of the log abstraction and its uses is far beyond the
+            scope of this post. For an in-depth overview of logs and how they are used to
+            construct distributed systems I highly recommend Jay Kreps’ post <a
+              href="https://engineering.linkedin.com/distributed-systems/log-what-every-software-engineer-should-know-about-real-time-datas-unifying">The
+              Log:
+              What every software engineer should know about real-time data’s unifying
+              abstraction</a>. While Kreps’ post discusses logs in general as well as
+            how distributed logs (e.g. <a href="https://kafka.apache.org/">Kafka</a>) are used at
+            <a href="https://www.linkedin.com">LinkedIn</a>, in this post we focus exclusively on
+            globally ordered logs; the type of log commonly built using consensus
+            algorithms such as
+            <a href="https://en.wikipedia.org/wiki/Paxos_(computer_science)">Paxos</a>.</p>
+          <p>Our approach is based on the design of the high-throughput <a
+              href="https://www.usenix.org/conference/nsdi12/technical-sessions/presentation/balakrishnan">CORFU
+              distributed
+              shared log</a>. Briefly, CORFU uses a cluster of flash devices onto which a
+            logical log is striped, spreading I/O load across the cluster. Notably, the
+            system is able to achieve high append rates using a few clever tricks that we
+            will discus later. The following excerpt from the <a
+              href="https://muratbuffalo.blogspot.com/2014/09/paper-summary-tango-distributed-data.html">Tango</a>
+            system built on top
+            of CORFU provides an excellent summary of the problem that CORFU solves:</p>
+          <blockquote class="quote">The second problem with a shared log abstraction relates to scalability;
+            existing implementations typically require appends to the log to be
+            serialized through a primary server, effectively limiting the append
+            throughput of the log to the I/O bandwidth of a single machine. This problem
+            is eliminated by the CORFU protocol.</blockquote>
+          <p>In the remainder of this post we will describe how the CORFU protocol works,
+            and how we have mapped its concepts onto <a href="https://ceph.com/ceph-storage/object-storage/">RADOS</a>,
+            the distributed
+            object-store that powers <a href="https://ceph.com">Ceph</a>. But first, why implement a distributed
+            log like CORFU on top of a system like RADOS?</p>
+          <p>Two aspects of the CORFU system make its design attractive in the context of
+            the RADOS storage system. First, CORFU assumes a cluster of flash devices
+            because log-centric systems tend to have a larger percentage of random reads
+            making it difficult to achieve high-performance with spinning disks. However,
+            the speed of the underlying storage does not affect correctness. Thus, in a
+            <a href="https://en.wikipedia.org/wiki/Software-defined_storage">software-defined storage
+              system</a> such as Ceph a
+            single implementation can transparently take advantage of any software or
+            hardware upgrades, and make use of data management features such as tiering
+            in RADOS,
+            allowing users to freely choose between media types such as SSD, spinning
+            disks, or future NVRAMs.</p>
+          <p>The second property of RADOS that makes it a great platform for implementing
+            the CORFU protocol relates to the dependency CORFU places on the interface to
+            storage devices. In order to enforce constraints defined within the CORFU
+            protocol, storage devices are expected to expose a domain-specific interface
+            specially designed for the protocol. While the authors of the CORFU paper
+            describe both a host-based and FPGA-based solution, RADOS directly supports
+            the concept of <a href="http://dachary.org/?p=2680">custom storage interfaces</a> to its
+            objects that can be used to achieve the transactional semantics necessary to
+            implement the CORFU storage interfaces. This feature is called <a
+              href="https://ceph.com/rados/dynamic-object-interfaces-with-lua/">RADOS object
+              classes</a>, and is
+            one of the most powerful features offered by RADOS for designing storage
+            applications.</p>
+          <p>Next I’ll briefly describe the CORFU system, then go into detail on how it
+            is mapped onto RADOS, and future enhancements to the implementation as well as
+            applications that can be built on top of the system.</p>
+
+            <div class="tabcordion tabbable">
+              <ul class="nav nav-tabs">
+                  <li class="active"><a data-target=".home" data-toggle="tab">The CORFU Distributed Shared Log</a></li>
+                  <li><a data-target=".profile" data-toggle="tab">A Distributed Shared Log on RADOS</a></li>
+                  <li><a data-target=".messages" data-toggle="tab">Example</a></li>
+                  <li><a data-target=".settings" data-toggle="tab">Epoch Management</a></li>
+              </ul>
+              <div class="tab-content">
+                  <div class="home active in tab-pane">
+                    <h2 id="the-corfu-distributed-shared-log">The CORFU Distributed Shared Log</h2>
+                    <p>So what is CORFU, anyway? It’s a high-performance, globally ordered,
+                      distributed shared-log. Addressing all of the nitty-gritty details of CORFU is
+                      beyond the scope of this post, so we will only touch on the overall
+                      architecture, salient features, and problems that CORFU solves. The following
+                      <a href="http://www.bailis.org/blog/msr-silicon-valley-systems-projects-i-have-loved/">summary written by
+                        Peter
+                        Balis</a>
+                      is a great description of the system and its power:</p>
+                    <blockquote class="quote">CORFU (Clusters of Raw Flash Units) is a system that exposes a cluster of
+                      servers loaded with flash drives as a high-throughput shared log
+                      abstraction. This is, in itself, a challenging distributed systems problem
+                      that the team solved elegantly via a mix of fast sequencing and clever
+                      protocol design. However, CORFU’s power is perhaps better demonstrated by
+                      Tango, a system the researchers built on top. Tango demonstrates how to
+                      build fault-tolerant, high-performance distributed data structures such as
+                      trees, maps, and serializable transactions by making efficient use of the
+                      shared log abstraction. This architecture is not only creative, but it’s a
+                      great use of modern hardware with excellent empirical results to boot</blockquote>
+                    <p>At a high-level the CORFU system contains two major components, shown below in
+                      the diagram that I have ‘‘borrowed’’ from the <a
+                        href="https://research.microsoft.com/pubs/157204/corfumain-final.pdf">published
+                        CORFU paper</a>
+                      for reference. First, a client library exposing a log abstraction is used to
+                      read and write from a logical log that is striped across a cluster of flash
+                      devices. The second component, the storage cluster, is composed of flash
+                      devices that export a custom networked interface that enforces properties
+                      required by the CORFU protocol. These two components alone are sufficient to
+                      support a consistent, globally ordered log, but without additional
+                      optimizations the system can’t scale to meet the needs of high-throughput
+                      applications. The graph below (also taken from the CORFU paper) shows the
+                      read and append performance the authors were able to achieve with 32 SSDs and
+                      2x replication. Pretty good!</p>
+                    <p><img src="/images/posts/corfu-arch-perf.png" alt="Image"></p>
+                    <p>Next I’ll describe the interfaces in the system and the basics of the protocol
+                      without any optimizations. Then I’ll describe how the CORFU system uses a cache
+                      of the log’s tail position that is used to achieve high-throughput appends.</p>
+                    <h3 id="storage-interface">Storage Interface</h3>
+                    <p>The I/O operations on a log in CORFU are in terms of flash device pages.
+                      The CORFU system depends on a domain-specific storage device interface
+                      designed for the CORFU protocol for reading and writing log locations, as well
+                      as maintenance operations. The following excerpt from the CORFU paper describes
+                      the <code>read</code>, <code>write</code>, and <code>trim</code> components of the interface:</p>
+                    <blockquote class="quote">To provide single-copy semantics for the shared log, CORFU requires
+                      ‘write-once’ semantics on the flash unit’s address space. Reads on pages
+                      that have not yet been written should return an error code
+                      (error-unwritten). Writes on pages that have already been written should
+                      also return an error code (error-overwritten). In addition to reads and
+                      writes, flash units are also required to expose a trim command, allowing
+                      clients to indicate that the flash page is not in use anymore.</blockquote>
+                    <p>In addition to <code>read</code>, <code>write</code>, <code>trim</code>, a storage device is also used as a
+                      coordination point for clients. The importance of this property will become
+                      evident later in our discussion when we introduce a caching layer that allows
+                      for high-throughput appends. Coordination is achieved using the <code>seal</code> primitive,
+                      described in the paper as:</p>
+                    <blockquote class="quote">In addition, flash units are required to support a ‘seal’ command. Each
+                      incoming message to a flash unit is tagged with an epoch number. When a
+                      particular epoch number is sealed at a flash unit, it must reject all subsequent
+                      messages sent with an epoch equal or lower to the sealed epoch. In
+                      addition, the flash unit is expected to send back an acknowledgment for the
+                      seal command to the sealing entity, including the highest page offset that
+                      has been written on its address space thus far.</blockquote>
+                    <p>Note that trimmed positions cannot be re-used given the write-once semantics.
+                      Thus, the storage device is expected to expose an infinite address space (in
+                      practice a 64-bit address space is sufficient). In summary, storage
+                      devices support random reads to previously written positions and write-once
+                      semantics to any given position. Finally, <code>trim</code> allows clients to mark
+                      positions as unused to support garbage collection, and a <code>seal</code> command is used
+                      to install a new epoch value and discover the largest address written to the
+                      device.</p>
+                    <h3 id="client-library">Client Library</h3>
+                    <p>A client library presents a log abstraction consisting of four operations, and
+                      hides all of the low-level details related to the CORFU protocol as well as
+                      access to the underlying storage
+                      devices. Overall it looks like a typical log abstraction. The <code>append</code> method
+                      adds an entry to the tail of the log and returns the position at which the
+                      entry is stored. The <code>read</code> method returns the data stored at a given
+                      position, or an error if the position has not yet been written. The <code>trim</code>
+                      method is used by applications to mark log positions as unused, allowing the
+                      system to reclaim space through a garbage collection mechanism. And finally,
+                      the <code>fill</code> method is used to fill a log position with a junk value to ensure
+                      that the position cannot be used.</p>
+                    <h4 id="slow-append-operation">Slow Append Operation</h4>
+                    <p>When a client wants to append to a log it must first find the tail. To do this
+                      a client may query each storage device in the cluster to discover the largest
+                      log position that has been written (recall from the description of the storage
+                      interface in the previous section that each device can be queried for its
+                      maximum position written). By taking the maximum position across all devices
+                      the tail can be discovered, and by writing to the next position the client
+                      will append to the end of the log. This process is referred to as <em>slow tail
+                        finding</em>, and clearly can’t scale to large clusters or support many clients.
+                      It’s really slow and painful. However, CORFU optimizes tail finding by
+                      introducing a network process called a <em>sequencer</em> that caches the tail to
+                      support high-throughput appends.</p>
+                    <h3 id="tail-caching-for-fast-appends">Tail Caching for Fast Appends</h3>
+                    <p>To address the scalability limits of the slow tail finding mechanism CORFU
+                      introduces a network server referred to as a <em>sequencer</em>. The sequencer caches
+                      the current tail as an in-memory counter and responds to client tail finding
+                      requests by first atomically incrementing the counter. By avoiding all I/O in
+                      the common case the sequencer is able to respond to tail finding requests at
+                      very high rates. If only it were this simple :)</p>
+                    <p>There are three issues that need to be resolved that arise from the use of the
+                      sequencer as an optimization. First, the sequencer is theoretically a system
+                      bottleneck. The authors address this throughput limitation by observing that 1)
+                      their basic, non-optimized sequencer implementation was able to saturate the
+                      flash cluster at a rate of over 200,000 requests per second, and 2) each log
+                      in a system can use a distinct sequencer process. The second issue is that the sequencer
+                      appears to represent a single point of failure. However, as noted previously,
+                      the sequencer is only an optimization, and clients may always fall back to the
+                      slow tail finding mechanism. It is important to note that <em><strong>in practice
+                          clients never use the slow tail finding algorithm</strong></em>, and instead rely on a
+                      cluster of sequencers in combination with a leader election protocol to select
+                      a primary sequencer responsible for a log.</p>
+                    <p>The third challenge with the use of a sequencer is the initialization of its
+                      in-memory counter. This is the most important challenge because it is directly
+                      related to the correctness of the system.
+                      Consider the scenario in which a sequencer is restarted but
+                      many clients have in-flight write operations. Since we cannot know the state
+                      of every client that has been previously granted a log position, what value
+                      should be used to initialize the counter in a new sequencer instance? The
+                      approach taken by CORFU is to execute the slow tail finding mechanism before a
+                      sequencer is brought online, while
+                      carefully ensuring that any in-flight client operations are invalidated by
+                      installing a new epoch value in each storage device. After this initialization
+                      process a sequencer will begin issuing new log positions tagged with a new
+                      epoch value, while any clients with in-flight operations will retry after contacting
+                      the new sequencer.</p>
+                    <h3 id="storage-fault-tolerance-in-corfu">Storage Fault-tolerance in CORFU</h3>
+                    <p>The CORFU system is designed to run on top of raw flash devices. In order to
+                      achieve fault-tolerance and availability a form of chain replication is used
+                      to introduce data redundancy. The methods used to protect data in CORFU are
+                      largely orthogonal to the protocol used to achieve high-throughput appends.
+                      Since the RADOS storage system already solves the fault-tolerance and
+                      availability problem, we will omit a detailed discussion of this topic.
+                      Briefly, CORFU constructs redundancy groups to which log entries are
+                      replicated. By using chain replication and serving reads from the end of the
+                      chain consistency can be ensured. At a high-level CORFU simply treats each
+                      replication group as a durable storage target. Thus, a natural analogy to the
+                      CORFU replication group in RADOS is the placement group or object. Next we will
+                      discuss the mapping from CORFU to RADOS in detail.</p>
+                  </div>
+                  <div class="profile tab-pane">
+                    <h2 id="a-distributed-shared-log-on-rados">A Distributed Shared Log on RADOS</h2>
+                    <p>So far we have seen how the CORFU system functions to achieve high-throughput
+                      appends to a globally ordered shared-log. Now we are going to discuss how the
+                      basic design of CORFU can be mapped onto Ceph. Specifically we are going to
+                      discuss the mapping of CORFU onto RADOS, a scalable, fault-tolerant
+                      object-based storage system that powers Ceph. Next I’ll give a brief overview of
+                      the salient features of RADOS that are important for this post, but a full
+                      discussion of the architecture of Ceph is beyond the scope of this post. There
+                      are <a href="https://www.youtube.com/watch?v=OyH1C0C4HzM">plenty</a> of
+                      <a href="https://www.sebastien-han.fr/blog/2012/06/10/introducing-ceph-to-openstack/">resources</a>
+                      for <a href="https://docs.ceph.com">learning</a> about
+                      <a href="https://ceph.com/">Ceph</a>, and I invite
+                      anyone not familiar with the
+                      <a href="https://www.youtube.com/watch?v=lWeWUhPkVV8">technology</a> to check them out!</p>
+                    <p><strong>Overview</strong>. The RADOS system is a distributed, scalable, and fault-tolerant
+                      object-based storage system that presents a cluster of unreliable nodes as a
+                      highly available object store. Each node is called as Object Storage Device
+                      (OSD) and is typically an off-the-shelf node with CPU, memory, and local disk.
+                      The RADOS system logically groups objects into placement groups and each
+                      placement group is assigned to one or more OSDs across which objects are stored
+                      redundantly (e.g. replication or erasure coding). Clients interact with RADOS
+                      through a library with a rich interface that completely hides the details of
+                      the underlying distributed system. A salient feature of RADOS that we make use
+                      of in this project is support for the <a
+                        href="https://ceph.com/rados/dynamic-object-interfaces-with-lua/">injection of user-defined
+                        code</a> for the
+                      creation of domain-specific transactional interfaces to object data that run
+                      within the cluster of storage devices.</p>
+                    <p>Next I’ll discuss the layout of a log within RADOS, the custom storage
+                      interfaces designed for the CORFU protocol, and then present the client
+                      libraries and show examples of how easy it is to use the <a href="https://github.com/cruzdb/zlog">zlog
+                        implementation</a>.</p>
+                    <h3 id="logical-log-layout">Logical Log Layout</h3>
+                    <p>In order to store a log in RADOS a choice must be made about how to assign log
+                      positions to addressable storage. For instance, each log position could be
+                      written to a dedicated object, or a single log could be striped across a fixed
+                      number of objects. Other strategies exist and each have different performance
+                      and implementation trade-offs, but that is a topic for a later post. However,
+                      for reasons related to bounding the slow tail finding mechanism, we’ve chosen
+                      a basic, initial implementation that stripes a log across a fixed (but
+                      adjustable across epochs) number of objects.</p>
+                    <p>A log is defined by a stripe width parameter that specifies how many objects
+                      the log should be striped across (a good choice is the number of placement
+                      groups in the target storage pool). Each log position is mapped round-robin
+                      onto this set of objects by the formula <code>object-id = log-position % stripe-width</code>. One might be
+                      tempted to think this would cause scalability
+                      issues as an object grows in size, however, RADOS contains a wide variety of
+                      object interfaces that allow us to access at a fine granularity both bulk and
+                      structured data associated with an object, efficiently supporting access to
+                      individual log positions even as the amount of data associated with an object
+                      grows.</p>
+                    <p>This mapping of log positions onto objects within RADOS is a direct analogy to
+                      the mapping of log positions in CORFU onto a set of SSDs organized into a
+                      redundancy group. Thus, the enforcement of the storage interface in CORFU must
+                      be achieved at the object level in RADOS. To accomplish this we use the
+                      object class feature of RADOS to install a custom interface that implements
+                      the interface expected by the CORFU protocol.</p>
+                    <h3 id="zlog-custom-object-interface">Zlog Custom Object Interface</h3>
+                    <p>The following code snippet shows the custom storage interface to objects in
+                      RADOS used to store log data. The ability to create custom object interfaces
+                      is a major feature of RADOS and you can <a
+                        href="https://ceph.com/rados/dynamic-object-interfaces-with-lua/">learn more about it
+                        here</a>.</p>
+                    <p>First we have the set of possible return codes defined by our custom
+                      interface. Note that error handling is two-level. The outer layer is composed
+                      of RADOS specific errors (e.g. network errors or failures) and the inner layer
+                      is for our protocol. Thus, these codes are only valid when the outer layer
+                      reports success.</p>
+                    <p><em>Note that below there are some RADOS specific items: the
+                        <code>ObjectWriteOperation</code> can be thought of as just encoding the name of the
+                        target object for the particular operation, the <code>bufferlist</code> is a fancy object
+                        for holding binary data, and the data retrieved through <code>cls_zlog_read</code> is
+                        accessed through the RADOS-specific <code>ObjectReadOperation</code> object.</em></p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++">  <span class="cm">/* Operation error codes. */</span>
+                      <span class="k">enum</span> <span class="p">{</span>
+                        <span class="n">CLS_ZLOG_OK</span>            <span class="o">=</span> <span class="mh">0x00</span><span class="p">,</span>
+                        <span class="n">CLS_ZLOG_STALE_EPOCH</span>   <span class="o">=</span> <span class="mh">0x01</span><span class="p">,</span>
+                        <span class="n">CLS_ZLOG_READ_ONLY</span>     <span class="o">=</span> <span class="mh">0x02</span><span class="p">,</span>
+                        <span class="n">CLS_ZLOG_NOT_WRITTEN</span>   <span class="o">=</span> <span class="mh">0x03</span><span class="p">,</span>
+                        <span class="n">CLS_ZLOG_INVALIDATED</span>   <span class="o">=</span> <span class="mh">0x04</span><span class="p">,</span>
+                        <span class="n">CLS_ZLOG_INVALID_EPOCH</span> <span class="o">=</span> <span class="mh">0x05</span><span class="p">,</span>
+                      <span class="p">};</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Install a new epoch in an object.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">void</span> <span class="nf">cls_zlog_seal</span><span class="p">(</span><span class="n">librados</span><span class="o">::</span><span class="n">ObjectWriteOperation</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">);</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Mark a log position as junk in an object.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">void</span> <span class="nf">cls_zlog_fill</span><span class="p">(</span><span class="n">librados</span><span class="o">::</span><span class="n">ObjectWriteOperation</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span>
+                        <span class="kt">uint64_t</span> <span class="n">position</span><span class="p">);</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Write to a log position in an object.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">void</span> <span class="nf">cls_zlog_write</span><span class="p">(</span><span class="n">librados</span><span class="o">::</span><span class="n">ObjectWriteOperation</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span>
+                        <span class="kt">uint64_t</span> <span class="n">position</span><span class="p">,</span> <span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">data</span><span class="p">);</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Read the contents of a log position in an object.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">void</span> <span class="nf">cls_zlog_read</span><span class="p">(</span><span class="n">librados</span><span class="o">::</span><span class="n">ObjectReadOperation</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span>
+                        <span class="n">uint65_t</span> <span class="n">position</span><span class="p">);</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Find the maximum log position written to an object.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">void</span> <span class="nf">cls_zlog_max_position</span><span class="p">(</span><span class="n">librados</span><span class="o">::</span><span class="n">ObjectReadOperation</span><span class="o">&amp;</span> <span class="n">op</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span>
+                        <span class="kt">uint64_t</span> <span class="o">*</span><span class="n">pposition</span><span class="p">,</span> <span class="kt">int</span> <span class="o">*</span><span class="n">pret</span><span class="p">);</span>
+                    </code></pre>
+                    </div>
+                    <p>The only substantial departure from the CORFU storage interface is that unlike
+                      in the CORFU protocol, finding the maximum position is a separate operation
+                      from <code>seal</code> which arises from certain limitations on what RADOS storage
+                      interfaces can do. However, <code>cls_zlog_max_position</code> does enforce the last
+                      sealed epoch, so when a new sequencer comes online and executes the slow tail
+                      finding procedure it should first seal each object and then use the newly
+                      installed epoch when querying for the maximum written position.</p>
+                    <p>We now have enough detail on how the system is structured to describe the slow
+                      tail finding procedure. First we need to seal each object that a log is
+                      striped across, and then we’ll query for the maximum position written. In the
+                      following code snippet, the for loop and <code>slot_to_oid</code> function implement log
+                      striping, and for each object we construct and execute a seal operation
+                      directed at the target object with the specified epoch.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">Log</span><span class="o">::</span><span class="n">Seal</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">)</span>
+                    <span class="p">{</span>
+                      <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">stripe_size_</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">oid</span> <span class="o">=</span> <span class="n">slot_to_oid</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+                    
+                        <span class="n">librados</span><span class="o">::</span><span class="n">ObjectWriteOperation</span> <span class="n">op</span><span class="p">;</span>
+                        <span class="n">cls_zlog_seal</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="n">epoch</span><span class="p">);</span>
+                        <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">ioctx_</span><span class="o">-&gt;</span><span class="n">operate</span><span class="p">(</span><span class="n">oid</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">op</span><span class="p">);</span>
+                    
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">!=</span> <span class="n">zlog</span><span class="o">::</span><span class="n">CLS_ZLOG_OK</span><span class="p">)</span> <span class="p">{</span>
+                          <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"failed to seal object"</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+                          <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                        <span class="p">}</span>
+                      <span class="p">}</span>
+                    
+                      <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+                    <span class="p">}</span>
+                    </code></pre>
+                    </div>
+                    <p>Once we’ve sealed each object that a log is striped across we use the newly
+                      installed epoch to query each object again for the maximum position that has
+                      been written. Note that since no existing client has knowledge of this new
+                      epoch value and each object rejects requests tagged with old epochs, we can be
+                      certain that once complete we have a guarantee on the maximum log position
+                      written across all objects.</p>
+                    <p>Like before we loop over each object that the log is striped across. For each
+                      object we construct and execute <code>cls_zlog_max_position</code> request. In the error
+                      free case we simply record the maximum position seen and return this value to
+                      the caller.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">Log</span><span class="o">::</span><span class="n">FindMaxPosition</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="o">*</span><span class="n">pposition</span><span class="p">)</span>
+                    <span class="p">{</span>
+                      <span class="kt">uint64_t</span> <span class="n">max_position</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span>
+                    
+                      <span class="k">for</span> <span class="p">(</span><span class="kt">int</span> <span class="n">i</span> <span class="o">=</span> <span class="mi">0</span><span class="p">;</span> <span class="n">i</span> <span class="o">&lt;</span> <span class="n">stripe_size_</span><span class="p">;</span> <span class="n">i</span><span class="o">++</span><span class="p">)</span> <span class="p">{</span>
+                        <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">oid</span> <span class="o">=</span> <span class="n">slot_to_oid</span><span class="p">(</span><span class="n">i</span><span class="p">);</span>
+                    
+                        <span class="n">librados</span><span class="o">::</span><span class="n">bufferlist</span> <span class="n">bl</span><span class="p">;</span>
+                        <span class="n">librados</span><span class="o">::</span><span class="n">ObjectReadOperation</span> <span class="n">op</span><span class="p">;</span>
+                        <span class="kt">int</span> <span class="n">op_ret</span><span class="p">;</span>
+                        <span class="kt">uint64_t</span> <span class="n">this_pos</span><span class="p">;</span>
+                    
+                        <span class="n">cls_zlog_max_position</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="n">epoch</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">this_pos</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">op_ret</span><span class="p">);</span>
+                    
+                        <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">ioctx_</span><span class="o">-&gt;</span><span class="n">operate</span><span class="p">(</span><span class="n">oid</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">op</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">bl</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+                          <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="o">-</span><span class="n">ENOENT</span><span class="p">)</span> <span class="c1">// no writes yet
+                    </span><span class="c1"></span>        <span class="k">continue</span><span class="p">;</span>
+                          <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"failed to find max pos "</span> <span class="o">&lt;&lt;</span> <span class="n">ret</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+                          <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                        <span class="p">}</span>
+                    
+                        <span class="k">if</span> <span class="p">(</span><span class="n">op_ret</span> <span class="o">==</span> <span class="n">zlog</span><span class="o">::</span><span class="n">CLS_ZLOG_OK</span><span class="p">)</span>
+                          <span class="n">max_position</span> <span class="o">=</span> <span class="n">std</span><span class="o">::</span><span class="n">max</span><span class="p">(</span><span class="n">max_position</span><span class="p">,</span> <span class="n">this_pos</span><span class="p">);</span>
+                      <span class="p">}</span>
+                    
+                      <span class="o">*</span><span class="n">pposition</span> <span class="o">=</span>  <span class="n">max_position</span><span class="p">;</span>
+                    
+                      <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+                    <span class="p">}</span>
+                    </code></pre>
+                    </div>
+                    <p>And that’s it. A sequencer installs a new epoch and executes the slow tail
+                      finding procedure for each new log, and anytime a sequencer is restarted. The
+                      resulting position of the slow tail finding mechanism is what the sequencer
+                      uses to initialize its in-memory cache of a log’s tail. Next we’ll discuss
+                      the design of the sequencer used in our implementation.</p>
+                    <h3 id="zlog-sequencer">Zlog Sequencer</h3>
+                    <p>There is a lot of flexibility in how the sequencer is implemented. All it
+                      needs to do is ensure that it can get a new epoch value, and that it seals all
+                      of the storage devices before starting to hand out log positions. Our current
+                      implementation is a standard
+                      <a href="https://www.boost.org/doc/libs/1_54_0/doc/html/boost_asio.html">Boost.ASIO</a>
+                      asynchronous TCP server. It is capable of managing any number of logs stored
+                      in multiple RADOS pools. In the later section <em>Epoch Management</em> I discuss
+                      options for how the sequencer can acquire new epoch values. The code below
+                      shows the interface to the sequencer service, which contains only one
+                      important method to query (and optionally increment) the tail of a log.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="k">class</span> <span class="nc">SeqrClient</span> <span class="p">{</span>
+                     <span class="k">public</span><span class="o">:</span>
+                      <span class="n">SeqrClient</span><span class="p">(</span><span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">host</span><span class="p">,</span> <span class="k">const</span> <span class="kt">char</span> <span class="o">*</span><span class="n">port</span><span class="p">)</span> <span class="o">:</span>
+                        <span class="n">socket_</span><span class="p">(</span><span class="n">io_service_</span><span class="p">),</span> <span class="n">host_</span><span class="p">(</span><span class="n">host</span><span class="p">),</span> <span class="n">port_</span><span class="p">(</span><span class="n">port</span><span class="p">)</span>
+                      <span class="p">{}</span>
+                    
+                      <span class="kt">void</span> <span class="nf">Connect</span><span class="p">();</span>
+                    
+                      <span class="cm">/*
+                    </span><span class="cm">   * Retrieve (and optionally increment) the tail position for a given log.
+                    </span><span class="cm">   */</span>
+                      <span class="kt">int</span> <span class="nf">CheckTail</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">epoch</span><span class="p">,</span> <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span> <span class="n">pool</span><span class="p">,</span>
+                          <span class="k">const</span> <span class="n">std</span><span class="o">::</span><span class="n">string</span><span class="o">&amp;</span> <span class="n">name</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="o">*</span><span class="n">position</span><span class="p">,</span> <span class="kt">bool</span> <span class="n">next</span><span class="p">);</span>
+                    
+                     <span class="k">private</span><span class="o">:</span>
+                      <span class="cm">/* ... boost stuff removed ... */</span>
+                    <span class="p">};</span>
+                    </code></pre>
+                    </div>
+                    <p>Log clients don’t interact with the sequencer directly, but rather indirectly
+                      through a client library that implements the log abstraction. For instance, the
+                      sequencer is contacted automatically when a client wants to append to the log.</p>
+                    <h3 id="zlog-client-library">Zlog Client Library</h3>
+                    <p>We now have all the bits and pieces necessary to demonstrate an end-to-end
+                      example. The following code shows the components of the log abstraction from
+                      the client library.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="k">class</span> <span class="nc">Log</span> <span class="p">{</span>
+                     <span class="k">public</span><span class="o">:</span>
+                      <span class="cm">/* ... cut ... */</span>
+                      <span class="kt">int</span> <span class="n">Append</span><span class="p">(</span><span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">bl</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="o">*</span><span class="n">pposition</span><span class="p">);</span>
+                      <span class="kt">int</span> <span class="nf">Read</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">position</span><span class="p">,</span> <span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">bl</span><span class="p">);</span>
+                      <span class="kt">int</span> <span class="nf">Trim</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">position</span><span class="p">);</span>
+                      <span class="kt">int</span> <span class="nf">Fill</span><span class="p">(</span><span class="kt">uint64_t</span> <span class="n">position</span><span class="p">);</span>
+                      <span class="cm">/* ... cut ... */</span>
+                    <span class="p">}</span>
+                    </code></pre>
+                    </div>
+                    <p>The details of the log abstraction shown here were discussed in the previous
+                      section on the CORFU system, so we’ll jump right into how this stuff is
+                      implemented. The next code snippet is for the <code>Append</code> method that upon
+                      successful completion returns to the caller the log position where the entry
+                      has been stored.</p>
+                    <p>The first step is to ask the sequencer what the current tail is. Specifically
+                      we ask it to give us the next position in the log by first atomically
+                      incrementing its in-memory counter using the <code>CheckTail</code> method of the
+                      sequencer client library.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="kt">int</span> <span class="n">Log</span><span class="o">::</span><span class="n">Append</span><span class="p">(</span><span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span><span class="o">&amp;</span> <span class="n">data</span><span class="p">,</span> <span class="kt">uint64_t</span> <span class="o">*</span><span class="n">pposition</span><span class="p">)</span>
+                    <span class="p">{</span>
+                      <span class="k">for</span> <span class="p">(;;)</span> <span class="p">{</span>
+                        <span class="kt">uint64_t</span> <span class="n">position</span><span class="p">;</span>
+                        <span class="kt">int</span> <span class="n">ret</span> <span class="o">=</span> <span class="n">CheckTail</span><span class="p">(</span><span class="o">&amp;</span><span class="n">position</span><span class="p">,</span> <span class="nb">true</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ret</span><span class="p">)</span>
+                          <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                    </code></pre>
+                    </div>
+                    <p>If successful, the sequencer will have given us the new tail position, so we
+                      should be able to write to this location without any hassle. To do this we
+                      construct a <code>cls_zlog_write</code> operation and execute it on the target object for
+                      this log position.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++">    <span class="n">librados</span><span class="o">::</span><span class="n">ObjectWriteOperation</span> <span class="n">op</span><span class="p">;</span>
+                        <span class="n">zlog</span><span class="o">::</span><span class="n">cls_zlog_write</span><span class="p">(</span><span class="n">op</span><span class="p">,</span> <span class="n">epoch_</span><span class="p">,</span> <span class="n">position</span><span class="p">,</span> <span class="n">data</span><span class="p">);</span>
+                    
+                        <span class="n">std</span><span class="o">::</span><span class="n">string</span> <span class="n">oid</span> <span class="o">=</span> <span class="n">position_to_oid</span><span class="p">(</span><span class="n">position</span><span class="p">);</span>
+                        <span class="n">ret</span> <span class="o">=</span> <span class="n">ioctx_</span><span class="o">-&gt;</span><span class="n">operate</span><span class="p">(</span><span class="n">oid</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">op</span><span class="p">);</span>
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">&lt;</span> <span class="mi">0</span><span class="p">)</span> <span class="p">{</span>
+                          <span class="n">std</span><span class="o">::</span><span class="n">cerr</span> <span class="o">&lt;&lt;</span> <span class="s">"append: failed ret "</span> <span class="o">&lt;&lt;</span> <span class="n">ret</span> <span class="o">&lt;&lt;</span> <span class="n">std</span><span class="o">::</span><span class="n">endl</span><span class="p">;</span>
+                          <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                        <span class="p">}</span>
+                    
+                        <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="n">zlog</span><span class="o">::</span><span class="n">CLS_ZLOG_OK</span><span class="p">)</span> <span class="p">{</span>
+                          <span class="k">if</span> <span class="p">(</span><span class="n">pposition</span><span class="p">)</span>
+                            <span class="o">*</span><span class="n">pposition</span> <span class="o">=</span> <span class="n">position</span><span class="p">;</span>
+                          <span class="k">return</span> <span class="mi">0</span><span class="p">;</span>
+                        <span class="p">}</span>
+                    </code></pre>
+                    </div>
+                    <p>If no RADOS-level errors occurred (e.g. network errors) then we examine the
+                      possible return values for our custom storage interface. First, if the
+                      operation was successful we return the position to the client and we are done.
+                      Otherwise there are two possible return values. First, we could been told by
+                      the storage device that our epoch value is too old
+                      (<code>zlog::CLS_ZLOG_STALE_EPOCH</code>). This can occur if the sequencer had to
+                      restart, or if the log was reconfigured (e.g. the stripe width was changed).
+                      The only other possible return value is that the log position has already been
+                      written (<code>zlog::CLS_ZLOG_READ_ONLY</code>). This can occur if it was filled with
+                      junk by another client to invalidate the position, or if following a sequencer
+                      restart another client beat us to the punch.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++">    <span class="k">if</span> <span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="n">zlog</span><span class="o">::</span><span class="n">CLS_ZLOG_STALE_EPOCH</span><span class="p">)</span> <span class="p">{</span>
+                          <span class="n">ret</span> <span class="o">=</span> <span class="n">RefreshProjection</span><span class="p">();</span>
+                          <span class="k">if</span> <span class="p">(</span><span class="n">ret</span><span class="p">)</span>
+                            <span class="k">return</span> <span class="n">ret</span><span class="p">;</span>
+                          <span class="k">continue</span><span class="p">;</span>
+                        <span class="p">}</span>
+                    
+                        <span class="n">assert</span><span class="p">(</span><span class="n">ret</span> <span class="o">==</span> <span class="n">zlog</span><span class="o">::</span><span class="n">CLS_ZLOG_READ_ONLY</span><span class="p">);</span>
+                      <span class="p">}</span>
+                      <span class="n">assert</span><span class="p">(</span><span class="mi">0</span><span class="p">);</span>
+                    <span class="p">}</span>
+                    </code></pre>
+                    </div>
+                    <p>And that’s pretty much it. You can check out the rest of the implementation
+                      including the details of the custom storage interface on Github:</p>
+                    <ul>
+                      <li><a href="https://github.com/cruzdb/zlog">https://github.com/cruzdb/zlog</a></li>
+                      <li><a
+                          href="https://github.com/cruzdb/zlog/tree/master/src/libzlog/backend">https://github.com/cruzdb/zlog/tree/master/src/libzlog/backend</a>
+                      </li>
+                    </ul>
+                    <p>We’ll finish up this post with a basic example of how to use the interface,
+                      discuss some future work we’ll be looking at, and address the issue of dealing
+                      with epoch values.</p>
+                  </div>
+                  <div class="messages tab-pane">
+                    <h2 id="example">Example</h2>
+                    <p>Assuming the sequencer service has been started, you’ll want to first create a
+                      connection to the sequencer using the sequencer client library:</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="n">zlog</span><span class="o">::</span><span class="n">SeqrClient</span> <span class="n">seqr</span><span class="p">(</span><span class="s">"localhost"</span><span class="p">,</span> <span class="s">"5678"</span><span class="p">);</span>
+                    </code></pre>
+                    </div>
+                    <p>Next create a brand new log. A given log is striped across objects in a RADOS
+                      pool. When you create a new log provide a handle to the pool, as well as a
+                      striping width and a name for the log.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="k">const</span> <span class="kt">int</span> <span class="n">stripe_width</span> <span class="o">=</span> <span class="mi">100</span><span class="p">;</span>
+                    <span class="n">zlog</span><span class="o">::</span><span class="n">Log</span> <span class="n">log</span><span class="p">;</span>
+                    <span class="n">zlog</span><span class="o">::</span><span class="n">Log</span><span class="o">::</span><span class="n">Create</span><span class="p">(</span><span class="n">ioctx</span><span class="p">,</span> <span class="s">"mylog"</span><span class="p">,</span> <span class="n">stripe_width</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">seqr</span><span class="p">,</span> <span class="n">log</span><span class="p">);</span>
+                    </code></pre>
+                    </div>
+                    <p>Now the log is available to use. In the following code snippet a string is
+                      appended to the log which returns the position at which the string was stored.
+                      Finally the string at the reported position is read back and verified.</p>
+                    <div class="highlight">
+                      <pre class="chroma"><code class="language-c++" data-lang="c++"><span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span> <span class="n">bl_in</span><span class="p">;</span>
+                    <span class="n">bl_in</span><span class="p">.</span><span class="n">append</span><span class="p">(</span><span class="s">"My first log entry"</span><span class="p">);</span>
+                    
+                    <span class="kt">uint64_t</span> <span class="n">pos</span><span class="p">;</span>
+                    <span class="n">log</span><span class="p">.</span><span class="n">Append</span><span class="p">(</span><span class="n">bl_in</span><span class="p">,</span> <span class="o">&amp;</span><span class="n">pos</span><span class="p">);</span>
+                    
+                    <span class="n">ceph</span><span class="o">::</span><span class="n">bufferlist</span> <span class="n">bl_out</span><span class="p">;</span>
+                    <span class="n">log</span><span class="p">.</span><span class="n">Read</span><span class="p">(</span><span class="n">pos</span><span class="p">,</span> <span class="n">bl_out</span><span class="p">);</span>
+                    
+                    <span class="n">assert</span><span class="p">(</span><span class="n">bl_in</span> <span class="o">==</span> <span class="n">bl_out</span><span class="p">);</span>
+                    </code></pre>
+                    </div>
+                    <p>The current implementation places no restriction on the size of the log
+                      entries. For efficiency reasons future versions will provide options for using
+                      fixed-size log entries.</p>
+                  </div>
+                  <div class="settings tab-pane">
+                    <h2 id="epoch-management">Epoch Management</h2>
+                    <p>Unique epoch values must be generated when a sequencer restarts or when a log
+                      is reconfigured, such as when the stripe width changes. The unique epoch value
+                      must be consistent and must be durable. Using any sort of service such as
+                      Paxos is sufficient. However, RADOS object operations are transactional and
+                      durable. We take advantage of this in our implementation in which we use a simple custom object interface
+                      that atomically increments a stored numeric value, allowing us avoid a dependency on
+                      another service.</p>
+
+                  </div>
+              </div>
+          </div>
+
+          <h2 id="whats-next">What’s Next</h2>
+          <p>There are a lot of directions we can go from here now that we have a basic proof-of-concept in place. Here
+            are some possible avenues for future work.</p>
+          <p><strong>Sequencer Clustering</strong>. Currently the system is tolerant to any races that
+            exist in the presence of multiple active sequencers. However, there is no
+            automatic fail-over for sequencers. The next step in this direction is to allow
+            sequencers to be deployed in clusters and use a leader election protocol for
+            sequencer master selection. This also requires adding a form of transparent
+            connection hand-off so clients don’t observe connection failures with
+            sequencer daemons.</p>
+          <p><strong>Applications</strong>. The CORFU papers lists several target applications including
+            <a href="https://www.cidrdb.org/cidr2011/Papers/CIDR11_Paper2.pdf">database management
+              system</a>, key-value
+            store, and replicated state machines. The <a
+              href="https://muratbuffalo.blogspot.com/2014/09/paper-summary-tango-distributed-data.html">Tango
+              system</a> was developed
+            on top of CORFU in a later paper and described a framework for building
+            metadata services. We have added a very basic proof-of-concept implementation
+            of Tango in our <a href="https://github.com/cruzdb/zlog">zlog</a> implementation, but it doesn’t yet contain
+            all of
+            the features described in the paper.</p>
+          <p><strong>Benchmarking</strong>. We’ve done some preliminary benchmarking, but we don’t have
+            access to a lot of hardware for large-scale testing. In general, depending on the setup, we’ve seen
+            anywhere between 1000 and 7000 log appends per second for a single OSD.
+            Currently Ceph isn’t optimized for this type of workload but there
+            are active development efforts to reduce latency for small I/Os to LevelDB and
+            RocksDB back-ends. We’ll also be exploring alternative storage back-ends with
+            fixed-size log entries that should improve throughput and latency.</p>
+         
+
+          
+        </article>
+
+        <section id="disqus_thread"></section>
+
+        <script type="text/javascript">
+          /* * * CONFIGURATION VARIABLES: EDIT BEFORE PASTING INTO YOUR WEBPAGE * * */
+          var disqus_shortname = 'noahdesugithubcom'; // required: replace example with your forum shortname
+          /* * * DON'T EDIT BELOW THIS LINE * * */
+          (function () {
+            var dsq = document.createElement('script'); dsq.type = 'text/javascript'; dsq.async = true;
+            dsq.src = '//' + disqus_shortname + '.disqus.com/embed.js';
+            (document.getElementsByTagName('head')[0] || document.getElementsByTagName('body')[0]).appendChild(dsq);
+          })();
+          /* * * DON'T EDIT BELOW THIS LINE * * */
+          (function () {
+            var s = document.createElement('script'); s.async = true;
+            s.type = 'text/javascript';
+            s.src = '//' + disqus_shortname + '.disqus.com/count.js';
+            (document.getElementsByTagName('HEAD')[0] || document.getElementsByTagName('BODY')[0]).appendChild(s);
+          }());
+        </script>
+        <noscript>Please enable JavaScript to view the <a href="http://disqus.com/?ref_noscript">comments powered by
+            Disqus.</a></noscript>
+        <a href="http://disqus.com" class="dsq-brlink">comments powered by <span class="logo-disqus">Disqus</span></a>
+
+
+      </div>
+
+    </div>
+  </div>
+
+  <footer class="site-footer">
+
+    <div class="wrapper">
+
+      <h2 class="footer-heading">makedist</h2>
+
+      <div class="footer-col-wrapper">
+        <div class="footer-col  footer-col-1">
+          <ul class="contact-list">
+            <li>makedist</li>
+            <li><a href="mailto:noahwatkins@gmail.com">noahwatkins@gmail.com</a></li>
+          </ul>
+        </div>
+
+        <div class="footer-col  footer-col-2">
+          <ul class="social-media-list">
+
+            <li>
+              <a href="https://github.com/noahdesu">
+                <span class="icon  icon--github">
+                  <svg viewBox="0 0 16 16">
+                    <path fill="#828282"
+                      d="M7.999,0.431c-4.285,0-7.76,3.474-7.76,7.761 c0,3.428,2.223,6.337,5.307,7.363c0.388,0.071,0.53-0.168,0.53-0.374c0-0.184-0.007-0.672-0.01-1.32 c-2.159,0.469-2.614-1.04-2.614-1.04c-0.353-0.896-0.862-1.135-0.862-1.135c-0.705-0.481,0.053-0.472,0.053-0.472 c0.779,0.055,1.189,0.8,1.189,0.8c0.692,1.186,1.816,0.843,2.258,0.645c0.071-0.502,0.271-0.843,0.493-1.037 C4.86,11.425,3.049,10.76,3.049,7.786c0-0.847,0.302-1.54,0.799-2.082C3.768,5.507,3.501,4.718,3.924,3.65 c0,0,0.652-0.209,2.134,0.796C6.677,4.273,7.34,4.187,8,4.184c0.659,0.003,1.323,0.089,1.943,0.261 c1.482-1.004,2.132-0.796,2.132-0.796c0.423,1.068,0.157,1.857,0.077,2.054c0.497,0.542,0.798,1.235,0.798,2.082 c0,2.981-1.814,3.637-3.543,3.829c0.279,0.24,0.527,0.713,0.527,1.437c0,1.037-0.01,1.874-0.01,2.129 c0,0.208,0.14,0.449,0.534,0.373c3.081-1.028,5.302-3.935,5.302-7.362C15.76,3.906,12.285,0.431,7.999,0.431z" />
+                  </svg>
+                </span>
+
+                <span class="username">noahdesu</span>
+              </a>
+            </li>
+
+
+
+            <li>
+              <a href="https://twitter.com/noahdesu">
+                <span class="icon  icon--twitter">
+                  <svg viewBox="0 0 16 16">
+                    <path fill="#828282"
+                      d="M15.969,3.058c-0.586,0.26-1.217,0.436-1.878,0.515c0.675-0.405,1.194-1.045,1.438-1.809
+                  c-0.632,0.375-1.332,0.647-2.076,0.793c-0.596-0.636-1.446-1.033-2.387-1.033c-1.806,0-3.27,1.464-3.27,3.27 c0,0.256,0.029,0.506,0.085,0.745C5.163,5.404,2.753,4.102,1.14,2.124C0.859,2.607,0.698,3.168,0.698,3.767 c0,1.134,0.577,2.135,1.455,2.722C1.616,6.472,1.112,6.325,0.671,6.08c0,0.014,0,0.027,0,0.041c0,1.584,1.127,2.906,2.623,3.206 C3.02,9.402,2.731,9.442,2.433,9.442c-0.211,0-0.416-0.021-0.615-0.059c0.416,1.299,1.624,2.245,3.055,2.271 c-1.119,0.877-2.529,1.4-4.061,1.4c-0.264,0-0.524-0.015-0.78-0.046c1.447,0.928,3.166,1.469,5.013,1.469 c6.015,0,9.304-4.983,9.304-9.304c0-0.142-0.003-0.283-0.009-0.423C14.976,4.29,15.531,3.714,15.969,3.058z" />
+                  </svg>
+                </span>
+
+                <span class="username">noahdesu</span>
+              </a>
+            </li>
+
+          </ul>
+        </div>
+
+        <div class="footer-col  footer-col-3">
+          <p class="text">Notes on programming, research, and other interests.
+          </p>
+          <p class="text">The design of the post used <a href="https://aexmachina.github.io/tabcordion/">js-accordion</a>
+          </p>
+        </div>
+      </div>
+
+    </div>
+
+  </footer>
+</body>
+
+</html>

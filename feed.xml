@@ -1,0 +1,254 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<rss version="2.0" xmlns:atom="http://www.w3.org/2005/Atom">
+  <channel>
+    <title>makedist</title>
+    <description>Notes on programming, research, and other interests.
+</description>
+    <link>http://noahdesu.github.io/</link>
+    <atom:link href="http://noahdesu.github.io/feed.xml" rel="self" type="application/rss+xml"/>
+    <pubDate>Thu, 21 Sep 2017 11:02:56 -0700</pubDate>
+    <lastBuildDate>Thu, 21 Sep 2017 11:02:56 -0700</lastBuildDate>
+    <generator>Jekyll v3.0.1</generator>
+    
+      <item>
+        <title>Slow cold-cache reads from placement group in Ceph</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/12/10/slow-cold-cache-reads-from-placement-group-in-ceph/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/12/10/slow-cold-cache-reads-from-placement-group-in-ceph/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/12/10/slow-cold-cache-reads-from-placement-group-in-ceph/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/12/10/slow-cold-cache-reads-from-placement-group-in-ceph/&quot;&gt;https://nwat.io/blog/2016/12/10/slow-cold-cache-reads-from-placement-group-in-ceph/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Sat, 10 Dec 2016 00:00:00 -0800</pubDate>
+        <link>http://noahdesu.github.io/2016/12/10/slow-object-reads-in-pg.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/12/10/slow-object-reads-in-pg.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>ceph</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Adding a new placement group operation in Ceph</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/12/04/adding-a-new-placement-group-operation-in-ceph/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/12/04/adding-a-new-placement-group-operation-in-ceph/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/12/04/adding-a-new-placement-group-operation-in-ceph/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/12/04/adding-a-new-placement-group-operation-in-ceph/&quot;&gt;https://nwat.io/blog/2016/12/04/adding-a-new-placement-group-operation-in-ceph/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Sun, 04 Dec 2016 00:00:00 -0800</pubDate>
+        <link>http://noahdesu.github.io/2016/12/04/ceph-pg-op.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/12/04/ceph-pg-op.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>ceph</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>userfaultfd hello world</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/10/10/measuring-userfaultfd-page-fault-latency/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/10/10/measuring-userfaultfd-page-fault-latency/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/10/10/measuring-userfaultfd-page-fault-latency/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/10/10/measuring-userfaultfd-page-fault-latency/&quot;&gt;https://nwat.io/blog/2016/10/10/measuring-userfaultfd-page-fault-latency/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Mon, 10 Oct 2016 00:00:00 -0700</pubDate>
+        <link>http://noahdesu.github.io/2016/10/10/userfaultfd-hello-world.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/10/10/userfaultfd-hello-world.html</guid>
+        
+        <category>userfaultfd</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Introduction to the ZLog Transaction Key-Value Store</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/08/02/introduction-to-the-zlog-transaction-key-value-store/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/08/02/introduction-to-the-zlog-transaction-key-value-store/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/08/02/introduction-to-the-zlog-transaction-key-value-store/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/08/02/introduction-to-the-zlog-transaction-key-value-store/&quot;&gt;https://nwat.io/blog/2016/08/02/introduction-to-the-zlog-transaction-key-value-store/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Tue, 02 Aug 2016 00:00:00 -0700</pubDate>
+        <link>http://noahdesu.github.io/2016/08/02/zlog-kvstore-intro.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/08/02/zlog-kvstore-intro.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>zlog</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>ZLog Project Update (mid-2016 edition)</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/06/30/zlog-project-update-mid-2016-edition/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/06/30/zlog-project-update-mid-2016-edition/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/06/30/zlog-project-update-mid-2016-edition/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/06/30/zlog-project-update-mid-2016-edition/&quot;&gt;https://nwat.io/blog/2016/06/30/zlog-project-update-mid-2016-edition/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Thu, 30 Jun 2016 00:00:00 -0700</pubDate>
+        <link>http://noahdesu.github.io/2016/06/30/zlog-performance-update.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/06/30/zlog-performance-update.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>zlog</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>RADOS Object Class Development Activity</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2016/01/06/rados-object-class-development-activity/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2016/01/06/rados-object-class-development-activity/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2016/01/06/rados-object-class-development-activity/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2016/01/06/rados-object-class-development-activity/&quot;&gt;https://nwat.io/blog/2016/01/06/rados-object-class-development-activity/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Wed, 06 Jan 2016 00:00:00 -0800</pubDate>
+        <link>http://noahdesu.github.io/2016/01/06/object-class-development-analysis.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2016/01/06/object-class-development-analysis.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>lua</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Toward Dynamic RADOS Object Class Management</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2015/12/14/toward-dynamic-rados-object-class-management/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2015/12/14/toward-dynamic-rados-object-class-management/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2015/12/14/toward-dynamic-rados-object-class-management/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2015/12/14/toward-dynamic-rados-object-class-management/&quot;&gt;https://nwat.io/blog/2015/12/14/toward-dynamic-rados-object-class-management/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Mon, 14 Dec 2015 00:00:00 -0800</pubDate>
+        <link>http://noahdesu.github.io/2015/12/14/towards-rados-object-class-management.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2015/12/14/towards-rados-object-class-management.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>lua</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Load Lua RADOS Classes From Local File System</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2015/12/06/load-lua-rados-classes-from-local-file-system/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2015/12/06/load-lua-rados-classes-from-local-file-system/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2015/12/06/load-lua-rados-classes-from-local-file-system/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2015/12/06/load-lua-rados-classes-from-local-file-system/&quot;&gt;https://nwat.io/blog/2015/12/06/load-lua-rados-classes-from-local-file-system/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Sun, 06 Dec 2015 00:00:00 -0800</pubDate>
+        <link>http://noahdesu.github.io/2015/12/06/load-lua-rados-plugin-from-fs.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2015/12/06/load-lua-rados-plugin-from-fs.html</guid>
+        
+        <category>rados,</category>
+        
+        <category>lua</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Zlog Asynchronous I/O Support</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2015/09/04/zlog-asynchronous-i/o-support/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2015/09/04/zlog-asynchronous-i/o-support/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2015/09/04/zlog-asynchronous-i/o-support/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2015/09/04/zlog-asynchronous-i/o-support/&quot;&gt;https://nwat.io/blog/2015/09/04/zlog-asynchronous-i/o-support/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Fri, 04 Sep 2015 00:00:00 -0700</pubDate>
+        <link>http://noahdesu.github.io/2015/09/04/zlog-async-api.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2015/09/04/zlog-async-api.html</guid>
+        
+        <category>zlog,</category>
+        
+        <category>corfu</category>
+        
+        
+      </item>
+    
+      <item>
+        <title>Hadoop on Ceph: Usability Survey</title>
+        <description>&lt;p&gt;&amp;lt;!DOCTYPE html&amp;gt;
+&lt;html lang=&quot;en-US&quot;&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;title&gt;Redirecting…&lt;/title&gt;
+&lt;link rel=&quot;canonical&quot; href=&quot;https://nwat.io/blog/2015/07/19/hadoop-on-ceph-usability-survey/&quot;&gt;
+&lt;meta http-equiv=&quot;refresh&quot; content=&quot;0; url=https://nwat.io/blog/2015/07/19/hadoop-on-ceph-usability-survey/&quot;&gt;
+&lt;h1&gt;Redirecting…&lt;/h1&gt;
+&lt;a href=&quot;https://nwat.io/blog/2015/07/19/hadoop-on-ceph-usability-survey/&quot;&gt;Click here if you are not redirected.&lt;/a&gt;
+&lt;script&gt;location=&amp;quot;&lt;a href=&quot;https://nwat.io/blog/2015/07/19/hadoop-on-ceph-usability-survey/&quot;&gt;https://nwat.io/blog/2015/07/19/hadoop-on-ceph-usability-survey/&lt;/a&gt;&amp;quot;&lt;/script&gt;
+&lt;/html&gt;&lt;/p&gt;
+</description>
+        <pubDate>Sun, 19 Jul 2015 00:00:00 -0700</pubDate>
+        <link>http://noahdesu.github.io/2015/07/19/hadoop-ceph-usability.html</link>
+        <guid isPermaLink="true">http://noahdesu.github.io/2015/07/19/hadoop-ceph-usability.html</guid>
+        
+        <category>hadoop,</category>
+        
+        <category>ceph,</category>
+        
+        <category>fedora</category>
+        
+        
+      </item>
+    
+  </channel>
+</rss>
